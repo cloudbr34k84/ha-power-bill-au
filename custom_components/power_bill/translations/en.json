@@ -1,0 +1,221 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Energy provider",
+        "description": "Name your energy provider (as on your bill), then pick the total kWh sensors to price. The name is used for the device and its sensors.",
+        "data": {
+          "provider": "Energy provider name",
+          "import_entity": "Import energy sensor (kWh, total)",
+          "export_entity": "Export energy sensor (kWh, total, optional)"
+        },
+        "data_description": {
+          "provider": "For example 1st Energy. Sensors are named after it, such as 1st Energy Current tariff."
+        }
+      },
+      "import_bands": {
+        "title": "Import rates",
+        "description": "Enter up to 3 daily time bands. Hours must be covered exactly once. A band can wrap past midnight (start 21, end 11). Leave a name blank to skip a slot.",
+        "data": {
+          "import_band_1_name": "Import band 1 name",
+          "import_band_1_start": "Import band 1 start hour (0-23)",
+          "import_band_1_end": "Import band 1 end hour (1-24, exclusive)",
+          "import_band_1_rate": "Import band 1 rate (AUD per kWh)",
+          "import_band_2_name": "Import band 2 name",
+          "import_band_2_start": "Import band 2 start hour (0-23)",
+          "import_band_2_end": "Import band 2 end hour (1-24, exclusive)",
+          "import_band_2_rate": "Import band 2 rate (AUD per kWh)",
+          "import_band_3_name": "Import band 3 name",
+          "import_band_3_start": "Import band 3 start hour (0-23)",
+          "import_band_3_end": "Import band 3 end hour (1-24, exclusive)",
+          "import_band_3_rate": "Import band 3 rate (AUD per kWh)"
+        }
+      },
+      "export_bands": {
+        "title": "Export rates",
+        "description": "Enter up to 3 feed-in (FiT) bands. Hours must be covered exactly once. Leave a name blank to skip a slot.",
+        "data": {
+          "export_band_1_name": "Export band 1 name",
+          "export_band_1_start": "Export band 1 start hour (0-23)",
+          "export_band_1_end": "Export band 1 end hour (1-24, exclusive)",
+          "export_band_1_rate": "Export band 1 rate (AUD per kWh)",
+          "export_band_2_name": "Export band 2 name",
+          "export_band_2_start": "Export band 2 start hour (0-23)",
+          "export_band_2_end": "Export band 2 end hour (1-24, exclusive)",
+          "export_band_2_rate": "Export band 2 rate (AUD per kWh)",
+          "export_band_3_name": "Export band 3 name",
+          "export_band_3_start": "Export band 3 start hour (0-23)",
+          "export_band_3_end": "Export band 3 end hour (1-24, exclusive)",
+          "export_band_3_rate": "Export band 3 rate (AUD per kWh)"
+        }
+      },
+      "charges": {
+        "title": "Charges and options",
+        "description": "Fixed daily charges and which other energy sensors to cost.",
+        "data": {
+          "rates_include_gst": "Rates include GST",
+          "daily_supply": "Daily supply charge (AUD/day)",
+          "daily_membership": "Daily membership fee (AUD/day)",
+          "tracked_devices": "Track cost of these energy sensors (optional)"
+        }
+      }
+    },
+    "error": {
+      "no_bands": "Enter at least one band with a name.",
+      "duplicate_names": "Band names must be unique.",
+      "invalid_window": "Each band needs a start and end hour that differ (start 0-23, end 1-24).",
+      "negative_rate": "Rates cannot be negative.",
+      "overlap": "Two bands cover the same hour.",
+      "gap": "Some hours of the day are not covered by any band.",
+      "invalid_provider": "Enter the name of your energy provider."
+    },
+    "abort": {
+      "already_configured": "This contract is already set up with these meters."
+    }
+  },
+  "options": {
+    "step": {
+      "import_bands": {
+        "title": "Import rates",
+        "description": "Enter up to 3 daily time bands. Hours must be covered exactly once. A band can wrap past midnight (start 21, end 11). Leave a name blank to skip a slot.",
+        "data": {
+          "import_band_1_name": "Import band 1 name",
+          "import_band_1_start": "Import band 1 start hour (0-23)",
+          "import_band_1_end": "Import band 1 end hour (1-24, exclusive)",
+          "import_band_1_rate": "Import band 1 rate (AUD per kWh)",
+          "import_band_2_name": "Import band 2 name",
+          "import_band_2_start": "Import band 2 start hour (0-23)",
+          "import_band_2_end": "Import band 2 end hour (1-24, exclusive)",
+          "import_band_2_rate": "Import band 2 rate (AUD per kWh)",
+          "import_band_3_name": "Import band 3 name",
+          "import_band_3_start": "Import band 3 start hour (0-23)",
+          "import_band_3_end": "Import band 3 end hour (1-24, exclusive)",
+          "import_band_3_rate": "Import band 3 rate (AUD per kWh)"
+        }
+      },
+      "export_bands": {
+        "title": "Export rates",
+        "description": "Enter up to 3 feed-in (FiT) bands. Hours must be covered exactly once. Leave a name blank to skip a slot.",
+        "data": {
+          "export_band_1_name": "Export band 1 name",
+          "export_band_1_start": "Export band 1 start hour (0-23)",
+          "export_band_1_end": "Export band 1 end hour (1-24, exclusive)",
+          "export_band_1_rate": "Export band 1 rate (AUD per kWh)",
+          "export_band_2_name": "Export band 2 name",
+          "export_band_2_start": "Export band 2 start hour (0-23)",
+          "export_band_2_end": "Export band 2 end hour (1-24, exclusive)",
+          "export_band_2_rate": "Export band 2 rate (AUD per kWh)",
+          "export_band_3_name": "Export band 3 name",
+          "export_band_3_start": "Export band 3 start hour (0-23)",
+          "export_band_3_end": "Export band 3 end hour (1-24, exclusive)",
+          "export_band_3_rate": "Export band 3 rate (AUD per kWh)"
+        }
+      },
+      "charges": {
+        "title": "Charges and options",
+        "description": "Fixed daily charges and which other energy sensors to cost.",
+        "data": {
+          "rates_include_gst": "Rates include GST",
+          "daily_supply": "Daily supply charge (AUD/day)",
+          "daily_membership": "Daily membership fee (AUD/day)",
+          "tracked_devices": "Track cost of these energy sensors (optional)"
+        }
+      },
+      "add_plan": {
+        "title": "Add a plan from a date",
+        "description": "Use this for a rate or plan change. Usage from this date is priced with the new plan. Earlier usage keeps the plan it was recorded under.",
+        "data": {
+          "effective_from": "Plan starts on"
+        }
+      },
+      "init": {
+        "title": "Power Bill options",
+        "menu_options": {
+          "provider": "Energy provider name",
+          "add_plan": "Add a plan from a date (rate or plan change)",
+          "demand": "Demand charge (a monthly fee based on your peak kW)",
+          "feed_in": "Stepped feed-in (a higher rate for the first kWh each day)",
+          "devices": "Tracked devices (extra cost sensors)"
+        }
+      },
+      "demand": {
+        "title": "Demand charge: which plan?",
+        "description": "Choose the plan this demand charge belongs to.",
+        "data": {
+          "plan": "Plan"
+        }
+      },
+      "devices": {
+        "title": "Tracked devices",
+        "description": "Pick other energy sensors (kWh) to price with this contract, for example an EV charger. Each one gets cost today, month to date and lifetime sensors. Deselecting a device removes its sensors.",
+        "data": {
+          "tracked_devices": "Energy sensors to track"
+        }
+      },
+      "demand_values": {
+        "title": "Demand charge",
+        "description": "Some plans charge a daily fee for every kW of your highest demand that month. On your bill this is the line **Demand (kW/Day)**: the number before 'KW' is the billed kW for that month, and the rate is the dollar amount after it.\n\nEnter the rate, then one line for each month you were billed, for example:\n`2025-01: 13.2`\n`2025-02: 10.1`\n\nLeave the months empty if your plan has no demand charge.\n\n**Estimate from my meter:** switch this on to have Power Bill work out your highest demand itself from your import meter, so the month's demand charge shows up before the bill arrives. A kW you enter for a month always replaces the estimate. Set the hours and block length to match your bill (for example 'Demand 7 days a week: 4:00pm to 9:00pm').",
+        "data": {
+          "demand_rate": "Demand rate (AUD per kW per day)",
+          "demand_kw": "Billed kW for each month",
+          "demand_estimate": "Estimate demand from my meter",
+          "demand_window_start": "Demand window starts (hour)",
+          "demand_window_end": "Demand window ends (hour)",
+          "demand_block_minutes": "Averaging block (minutes)"
+        },
+        "data_description": {
+          "demand_rate": "The rate on the Demand line of your bill, for example 0.185.",
+          "demand_kw": "One month per line as YYYY-MM: kW. Use the kW printed on that month's bill.",
+          "demand_estimate": "Needs about a week of 5-minute meter history. Months you enter above are never overridden.",
+          "demand_window_start": "24-hour clock, for example 16 for 4pm.",
+          "demand_window_end": "24-hour clock, for example 21 for 9pm.",
+          "demand_block_minutes": "Most retailers use 30. The highest average over one block, starting on the clock, is your demand."
+        }
+      },
+      "feed_in": {
+        "title": "Stepped feed-in: which plan?",
+        "description": "Choose the plan this feed-in rule belongs to.",
+        "data": {
+          "plan": "Plan"
+        }
+      },
+      "feed_in_values": {
+        "title": "Stepped feed-in",
+        "description": "Some solar feed-in tariffs pay a higher rate for the first few kWh you export each day, and a lower rate after that. On your bill these appear as **Solar FiT - Step 1** and **Step 2**.\n\nSet the daily limit to 0 to switch this off. Only plans with a single feed-in band can use this.",
+        "data": {
+          "step_1_rate": "Step 1 rate (AUD per kWh)",
+          "daily_cap": "Step 1 covers this many kWh per day",
+          "step_2_rate": "Step 2 rate (AUD per kWh)"
+        },
+        "data_description": {
+          "step_1_rate": "The higher rate, paid on the first kWh each day.",
+          "daily_cap": "For example 8 means the first 8 kWh exported each day are paid at step 1.",
+          "step_2_rate": "The lower rate, paid on everything above the daily limit."
+        }
+      },
+      "provider": {
+        "title": "Energy provider name",
+        "description": "The name on your bill, for example 1st Energy. Changing it renames the device and its sensors. Entity IDs don't change.",
+        "data": {
+          "provider": "Energy provider name"
+        }
+      }
+    },
+    "error": {
+      "no_bands": "Enter at least one band with a name.",
+      "duplicate_names": "Band names must be unique.",
+      "invalid_window": "Each band needs a start and end hour that differ (start 0-23, end 1-24).",
+      "negative_rate": "Rates cannot be negative.",
+      "overlap": "Two bands cover the same hour.",
+      "gap": "Some hours of the day are not covered by any band.",
+      "duplicate_date": "A plan already starts on this date.",
+      "invalid_demand": "Use one month per line as YYYY-MM: kW, for example 2025-01: 13.2",
+      "needs_single_band": "Stepped feed-in needs a plan with a single feed-in band.",
+      "invalid_demand_window": "The window must end after it starts, for example 16 to 21.",
+      "invalid_provider": "Enter the name of your energy provider."
+    },
+    "abort": {
+      "no_export_meter": "This plan has no feed-in band. Set up an export meter first."
+    }
+  }
+}
