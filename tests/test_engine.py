@@ -9,7 +9,8 @@ from __future__ import annotations
 import importlib.util
 import pathlib
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -52,18 +53,36 @@ E3_EXPORT = [
     Band(name="fit_shoulder", start=10, end=16, rate=0.015),
     Band(name="fit_off_peak", start=21, end=10, rate=0.035),
 ]
-E1_IMPORT = [Band(name="peak", start=0, end=24, rate=0.22)]  # flat day rate, Apr-Jul 13 2025
+E1_IMPORT = [
+    Band(name="peak", start=0, end=24, rate=0.22)
+]  # flat day rate, Apr-Jul 13 2025
 
 
 def timeline() -> Timeline:
-    return Timeline([
-        Plan(effective_from=date(2025, 4, 1), import_schedule=Schedule(E1_IMPORT),
-             daily_supply=1.09, daily_membership=0.5422),
-        Plan(effective_from=date(2025, 7, 14), import_schedule=Schedule(E2_IMPORT),
-             export_schedule=Schedule(E2_EXPORT), daily_supply=1.155, daily_membership=0.5422),
-        Plan(effective_from=date(2026, 7, 1), import_schedule=Schedule(E3_IMPORT),
-             export_schedule=Schedule(E3_EXPORT), daily_supply=1.4491, daily_membership=0.5422),
-    ])
+    return Timeline(
+        [
+            Plan(
+                effective_from=date(2025, 4, 1),
+                import_schedule=Schedule(E1_IMPORT),
+                daily_supply=1.09,
+                daily_membership=0.5422,
+            ),
+            Plan(
+                effective_from=date(2025, 7, 14),
+                import_schedule=Schedule(E2_IMPORT),
+                export_schedule=Schedule(E2_EXPORT),
+                daily_supply=1.155,
+                daily_membership=0.5422,
+            ),
+            Plan(
+                effective_from=date(2026, 7, 1),
+                import_schedule=Schedule(E3_IMPORT),
+                export_schedule=Schedule(E3_EXPORT),
+                daily_supply=1.4491,
+                daily_membership=0.5422,
+            ),
+        ]
+    )
 
 
 def pricer_for(bands):
@@ -83,10 +102,16 @@ def test_bill_sep_2025_charges_match_plan_e2():
     for name, kwh in [("peak", 339.33), ("shoulder", 83.80), ("off_peak", 407.04)]:
         rate = next(b.rate for b in E2_IMPORT if b.name == name)
         ledger.add_energy("import", day, name, kwh, rate)
-    for name, kwh in [("fit_off_peak", 265.15), ("fit_peak", 28.22), ("fit_shoulder", 812.06)]:
+    for name, kwh in [
+        ("fit_off_peak", 265.15),
+        ("fit_peak", 28.22),
+        ("fit_shoulder", 812.06),
+    ]:
         rate = next(b.rate for b in E2_EXPORT if b.name == name)
         ledger.add_energy("export", day, name, kwh, rate)
-    ledger.ensure_fixed_through(date(2025, 9, 30), lambda d: timeline().plan_on(d).fixed_per_day)
+    ledger.ensure_fixed_through(
+        date(2025, 9, 30), lambda d: timeline().plan_on(d).fixed_per_day
+    )
     summary = engine.summarize(ledger, date(2025, 9, 30))
     assert summary["import_month"] == pytest.approx(308.57, abs=0.10)
     assert summary["export_month"] == pytest.approx(33.73, abs=0.05)
@@ -99,10 +124,16 @@ def test_bill_oct_2026_charges_match_plan_e3():
     for name, kwh in [("peak", 434.50), ("off_peak", 164.91), ("shoulder", 535.95)]:
         rate = next(b.rate for b in E3_IMPORT if b.name == name)
         ledger.add_energy("import", day, name, kwh, rate)
-    for name, kwh in [("fit_off_peak", 182.31), ("fit_peak", 12.09), ("fit_shoulder", 450.07)]:
+    for name, kwh in [
+        ("fit_off_peak", 182.31),
+        ("fit_peak", 12.09),
+        ("fit_shoulder", 450.07),
+    ]:
         rate = next(b.rate for b in E3_EXPORT if b.name == name)
         ledger.add_energy("export", day, name, kwh, rate)
-    ledger.ensure_fixed_through(date(2026, 10, 31), lambda d: timeline().plan_on(d).fixed_per_day)
+    ledger.ensure_fixed_through(
+        date(2026, 10, 31), lambda d: timeline().plan_on(d).fixed_per_day
+    )
     summary = engine.summarize(ledger, date(2026, 10, 31))
     assert summary["import_month"] == pytest.approx(374.28, abs=0.10)
     assert summary["export_month"] == pytest.approx(14.34, abs=0.05)
@@ -115,7 +146,9 @@ def test_plan_on_switches_on_effective_date():
     assert tl.plan_on(date(2025, 7, 14)).effective_from == date(2025, 7, 14)
     assert tl.plan_on(date(2026, 6, 30)).effective_from == date(2025, 7, 14)
     assert tl.plan_on(date(2026, 7, 1)).effective_from == date(2026, 7, 1)
-    assert tl.plan_on(date(2020, 1, 1)).effective_from == date(2025, 4, 1)  # before first plan
+    assert tl.plan_on(date(2020, 1, 1)).effective_from == date(
+        2025, 4, 1
+    )  # before first plan
 
 
 def test_readings_are_priced_by_plan_in_force_at_the_time():
@@ -128,9 +161,13 @@ def test_readings_are_priced_by_plan_in_force_at_the_time():
         return band.name, band.rate * plan.import_factor
 
     ledger = UsageLedger()
-    ledger.record("import", 100.0, datetime(2025, 7, 13, 17, 0), plan_pricer)  # baseline
+    ledger.record(
+        "import", 100.0, datetime(2025, 7, 13, 17, 0), plan_pricer
+    )  # baseline
     ledger.record("import", 101.0, datetime(2025, 7, 13, 17, 0), plan_pricer)
-    ledger.record("import", 101.0, datetime(2025, 7, 14, 17, 0), plan_pricer)  # baseline for 14 Jul
+    ledger.record(
+        "import", 101.0, datetime(2025, 7, 14, 17, 0), plan_pricer
+    )  # baseline for 14 Jul
     ledger.record("import", 102.0, datetime(2025, 7, 14, 17, 0), plan_pricer)
     assert ledger.days["import"]["2025-07-13"]["peak"]["cost"] == pytest.approx(0.22)
     assert ledger.days["import"]["2025-07-14"]["peak"]["cost"] == pytest.approx(0.41)
@@ -142,17 +179,26 @@ def test_rate_change_does_not_reprice_history():
     ledger.record("import", 10.0, when, pricer_for(E3_IMPORT))
     ledger.record("import", 11.0, when, pricer_for(E3_IMPORT))  # 1 kWh at 0.1657
     before = ledger.lifetime_cost("import")
-    doubled = [Band(name=b.name, start=b.start, end=b.end, rate=b.rate * 2) for b in E3_IMPORT]
+    doubled = [
+        Band(name=b.name, start=b.start, end=b.end, rate=b.rate * 2) for b in E3_IMPORT
+    ]
     ledger.record("import", 12.0, when, pricer_for(doubled))  # 1 kWh at 0.3314
     assert ledger.lifetime_cost("import") == pytest.approx(before + 0.3314)
-    assert ledger.days["import"]["2026-10-15"]["off_peak"]["cost"] == pytest.approx(0.1657 + 0.3314)
+    assert ledger.days["import"]["2026-10-15"]["off_peak"]["cost"] == pytest.approx(
+        0.1657 + 0.3314
+    )
 
 
 def test_gap_and_overlap_are_rejected():
     with pytest.raises(ValueError, match="gap"):
         Schedule([Band(name="peak", start=16, end=21, rate=0.4)])
     with pytest.raises(ValueError, match="overlap"):
-        Schedule([Band(name="a", start=0, end=12, rate=0.1), Band(name="b", start=10, end=24, rate=0.2)])
+        Schedule(
+            [
+                Band(name="a", start=0, end=12, rate=0.1),
+                Band(name="b", start=10, end=24, rate=0.2),
+            ]
+        )
 
 
 def test_wrapping_band_and_next_change():
@@ -165,22 +211,38 @@ def test_wrapping_band_and_next_change():
 
 def test_timeline_rejects_duplicate_start_and_empty():
     with pytest.raises(ValueError, match="duplicate_start"):
-        Timeline([Plan(effective_from=date(2026, 1, 1), import_schedule=Schedule(E1_IMPORT)),
-                  Plan(effective_from=date(2026, 1, 1), import_schedule=Schedule(E1_IMPORT))])
+        Timeline(
+            [
+                Plan(
+                    effective_from=date(2026, 1, 1), import_schedule=Schedule(E1_IMPORT)
+                ),
+                Plan(
+                    effective_from=date(2026, 1, 1), import_schedule=Schedule(E1_IMPORT)
+                ),
+            ]
+        )
     with pytest.raises(ValueError, match="no_plans"):
         Timeline([])
 
 
 def test_gst_factor_applies_when_rates_are_ex_gst():
-    plan = Plan(effective_from=date(2026, 1, 1), import_schedule=Schedule(E3_IMPORT),
-                daily_supply=1.0, daily_membership=0.0, rates_include_gst=False)
+    plan = Plan(
+        effective_from=date(2026, 1, 1),
+        import_schedule=Schedule(E3_IMPORT),
+        daily_supply=1.0,
+        daily_membership=0.0,
+        rates_include_gst=False,
+    )
     assert plan.import_factor == pytest.approx(1.10)
     assert plan.fixed_per_day == pytest.approx(1.10)
 
 
 def test_fixed_charge_backfills_month_then_fills_gaps_once():
     ledger = UsageLedger()
-    amount = lambda d: 1.9913
+
+    def amount(d):
+        return 1.9913
+
     assert ledger.ensure_fixed_through(date(2026, 10, 15), amount) == 15
     assert ledger.ensure_fixed_through(date(2026, 10, 15), amount) == 0
     assert ledger.ensure_fixed_through(date(2026, 10, 18), amount) == 3
@@ -216,14 +278,22 @@ def test_prune_drops_old_days():
 
 def test_export_daily_cap_splits_each_day_into_steps():
     """Feed-in step 1 is the first 8 kWh of each day at 7c; the rest is step 2 at 3c."""
-    plan = Plan(effective_from=date(2000, 1, 1), import_schedule=Schedule(E1_IMPORT),
-                export_schedule=Schedule([Band(name="fit", start=0, end=24, rate=0.07)]),
-                daily_supply=1.09, daily_membership=0.5422, export_daily_cap=8.0, export_over_cap_rate=0.03)
+    plan = Plan(
+        effective_from=date(2000, 1, 1),
+        import_schedule=Schedule(E1_IMPORT),
+        export_schedule=Schedule([Band(name="fit", start=0, end=24, rate=0.07)]),
+        daily_supply=1.09,
+        daily_membership=0.5422,
+        export_daily_cap=8.0,
+        export_over_cap_rate=0.03,
+    )
     ledger = UsageLedger()
     engine.book_export_day(ledger, "export", date(2025, 2, 1), 10.0, plan)
     assert ledger.lifetime_cost("export") == pytest.approx(8.0 * 0.07 + 2.0 * 0.03)
     engine.book_export_day(ledger, "export", date(2025, 2, 2), 5.0, plan)
-    assert ledger.lifetime_cost("export") == pytest.approx(8.0 * 0.07 + 2.0 * 0.03 + 5.0 * 0.07)
+    assert ledger.lifetime_cost("export") == pytest.approx(
+        8.0 * 0.07 + 2.0 * 0.03 + 5.0 * 0.07
+    )
 
 
 def test_band_kwh_today_and_month():
@@ -231,16 +301,22 @@ def test_band_kwh_today_and_month():
     ledger.add_energy("import", date(2026, 10, 14), "peak", 3.0, 0.4)
     ledger.add_energy("import", date(2026, 10, 15), "peak", 2.0, 0.4)
     ledger.add_energy("import", date(2026, 10, 15), "off_peak", 1.5, 0.2)
-    assert engine.band_kwh(ledger, "import", date(2026, 10, 15), "today") == {"peak": 2.0, "off_peak": 1.5}
-    assert engine.band_kwh(ledger, "import", date(2026, 10, 15), "month") == {"peak": 5.0, "off_peak": 1.5}
+    assert engine.band_kwh(ledger, "import", date(2026, 10, 15), "today") == {
+        "peak": 2.0,
+        "off_peak": 1.5,
+    }
+    assert engine.band_kwh(ledger, "import", date(2026, 10, 15), "month") == {
+        "peak": 5.0,
+        "off_peak": 1.5,
+    }
     assert engine.band_kwh(ledger, "import", date(2026, 11, 1), "month") == {}
 
 
 # ---- demand estimated from meter data -----------------------------------------------------------
 
+
 def _slots(day: date, hour: int, minute: int, kwh_each: float, count: int):
     """`count` consecutive 5-minute slots starting at hour:minute."""
-    from datetime import timedelta
     start = datetime(day.year, day.month, day.day, hour, minute)
     return [(start + timedelta(minutes=5 * i), kwh_each) for i in range(count)]
 
@@ -253,7 +329,15 @@ def test_block_peak_is_the_highest_clock_aligned_half_hour():
     day = date(2026, 11, 5)
     slots = _flat_window(day)
     # 17:00-17:30 averages 9 kW (0.75 kWh per 5 minutes)
-    slots = [(t, 0.75 if datetime(2026, 11, 5, 17, 0) <= t < datetime(2026, 11, 5, 17, 30) else v) for t, v in slots]
+    slots = [
+        (
+            t,
+            0.75
+            if datetime(2026, 11, 5, 17, 0) <= t < datetime(2026, 11, 5, 17, 30)
+            else v,
+        )
+        for t, v in slots
+    ]
     peaks = engine.block_peaks(slots, start_hour=16, end_hour=21, block_minutes=30)
     kw, at = peaks["2026-11"]
     assert round(kw, 6) == 9.0
@@ -264,22 +348,38 @@ def test_a_spike_straddling_two_blocks_is_split_like_the_retailer_meter_does():
     day = date(2026, 11, 5)
     slots = _flat_window(day)
     # 17:15-17:45 at 9 kW would be a 9 kW *sliding* peak, but only half of it lands in each aligned block
-    slots = [(t, 0.75 if datetime(2026, 11, 5, 17, 15) <= t < datetime(2026, 11, 5, 17, 45) else v) for t, v in slots]
-    kw, _ = engine.block_peaks(slots, start_hour=16, end_hour=21, block_minutes=30)["2026-11"]
+    slots = [
+        (
+            t,
+            0.75
+            if datetime(2026, 11, 5, 17, 15) <= t < datetime(2026, 11, 5, 17, 45)
+            else v,
+        )
+        for t, v in slots
+    ]
+    kw, _ = engine.block_peaks(slots, start_hour=16, end_hour=21, block_minutes=30)[
+        "2026-11"
+    ]
     assert round(kw, 6) == round((0.75 * 3 + 0.1 * 3) * 2, 6)  # 5.1 kW, not 9.0
 
 
 def test_blocks_outside_the_window_or_with_gaps_are_ignored():
     day = date(2026, 11, 5)
     outside = _slots(day, 13, 30, 0.9, 6)  # 10.8 kW, but before 4pm
-    gap = [s for s in _slots(day, 18, 0, 0.9, 6) if s[0].minute != 15]  # one slot missing
+    gap = [
+        s for s in _slots(day, 18, 0, 0.9, 6) if s[0].minute != 15
+    ]  # one slot missing
     kept = _slots(day, 19, 0, 0.2, 6)  # 2.4 kW
-    kw, at = engine.block_peaks(outside + gap + kept, start_hour=16, end_hour=21, block_minutes=30)["2026-11"]
+    kw, at = engine.block_peaks(
+        outside + gap + kept, start_hour=16, end_hour=21, block_minutes=30
+    )["2026-11"]
     assert round(kw, 6) == 2.4 and at == datetime(2026, 11, 5, 19, 0)
 
 
 def test_block_peaks_are_kept_per_month():
-    slots = _slots(date(2026, 10, 30), 17, 0, 0.5, 6) + _slots(date(2026, 11, 2), 17, 0, 0.25, 6)
+    slots = _slots(date(2026, 10, 30), 17, 0, 0.5, 6) + _slots(
+        date(2026, 11, 2), 17, 0, 0.25, 6
+    )
     peaks = engine.block_peaks(slots, start_hour=16, end_hour=21, block_minutes=30)
     assert round(peaks["2026-10"][0], 6) == 6.0 and round(peaks["2026-11"][0], 6) == 3.0
 
@@ -291,30 +391,138 @@ def test_block_peaks_reject_bad_settings():
 
 
 def test_billed_kw_always_beats_the_estimate_and_estimate_needs_the_switch():
-    base = dict(effective_from=date(2000, 1, 1), import_schedule=Schedule([Band(name="flat", start=0, end=24, rate=0.22)]),
-                demand_rate=0.185, demand_kw={"2026-10": 5.0})
+    base = dict(
+        effective_from=date(2000, 1, 1),
+        import_schedule=Schedule([Band(name="flat", start=0, end=24, rate=0.22)]),
+        demand_rate=0.185,
+        demand_kw={"2026-10": 5.0},
+    )
     on = Plan(**base, demand_estimate=True)
     off = Plan(**base)
     est = {"2026-10": 9.0, "2026-11": 9.0}
     assert on.demand_kw_for("2026-10", est) == 5.0  # billed wins
     assert on.demand_kw_for("2026-11", est) == 9.0  # estimate fills the unbilled month
-    assert off.demand_kw_for("2026-11", est) == 0.0  # switched off: nothing is estimated
-    assert round(on.demand_per_day(date(2026, 11, 1), est), 6) == round(9.0 * 0.185 * 1.0, 6)
+    assert (
+        off.demand_kw_for("2026-11", est) == 0.0
+    )  # switched off: nothing is estimated
+    assert round(on.demand_per_day(date(2026, 11, 1), est), 6) == round(
+        9.0 * 0.185 * 1.0, 6
+    )
 
 
 def test_a_rising_estimate_reprices_every_kept_day_of_that_month_once():
-    plan = Plan(effective_from=date(2000, 1, 1), import_schedule=Schedule([Band(name="flat", start=0, end=24, rate=0.22)]),
-                daily_supply=1.0, demand_rate=0.2, demand_estimate=True)
+    plan = Plan(
+        effective_from=date(2000, 1, 1),
+        import_schedule=Schedule([Band(name="flat", start=0, end=24, rate=0.22)]),
+        daily_supply=1.0,
+        demand_rate=0.2,
+        demand_estimate=True,
+    )
     ledger = UsageLedger()
-    engine.book_fixed_range(ledger, date(2026, 10, 31), date(2026, 11, 3), lambda d: plan.charge_per_day(d, ledger.demand_estimates()))
+    engine.book_fixed_range(
+        ledger,
+        date(2026, 10, 31),
+        date(2026, 11, 3),
+        lambda d: plan.charge_per_day(d, ledger.demand_estimates()),
+    )
     before = ledger.totals["fixed"]["cost"]
     assert before == pytest.approx(4.0)
     peak_at = datetime(2026, 11, 2, 17, 0)
     assert ledger.merge_demand_peaks({"2026-11": (5.0, peak_at)}) == {"2026-11"}
-    amount_for = lambda d: plan.charge_per_day(d, ledger.demand_estimates())
+
+    def amount_for(d):
+        return plan.charge_per_day(d, ledger.demand_estimates())
+
     assert ledger.reprice_fixed_days({"2026-11"}, amount_for) == 3
-    assert ledger.totals["fixed"]["cost"] == pytest.approx(4.0 + 3 * 5.0 * 0.2)  # Nov 1-3 only, not Oct 31
+    assert ledger.totals["fixed"]["cost"] == pytest.approx(
+        4.0 + 3 * 5.0 * 0.2
+    )  # Nov 1-3 only, not Oct 31
     assert ledger.reprice_fixed_days({"2026-11"}, amount_for) == 0  # idempotent
-    assert ledger.merge_demand_peaks({"2026-11": (4.0, peak_at)}) == set()  # a lower block never lowers a peak
+    assert (
+        ledger.merge_demand_peaks({"2026-11": (4.0, peak_at)}) == set()
+    )  # a lower block never lowers a peak
     # peaks survive a restart
-    assert UsageLedger(ledger.to_dict()).demand_peaks["2026-11"]["kw"] == pytest.approx(5.0)
+    assert UsageLedger(ledger.to_dict()).demand_peaks["2026-11"]["kw"] == pytest.approx(
+        5.0
+    )
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -1.0])
+def test_invalid_energy_readings_leave_the_baseline_unchanged(value):
+    ledger = UsageLedger()
+    when = datetime(2026, 11, 7, 12)
+    ledger.record("import", 100.0, when, lambda _: ("flat", 0.2))
+    assert ledger.record("import", value, when, lambda _: ("flat", 0.2)) == 0
+    assert ledger.last_seen["import"] == 100.0
+    assert ledger.record("import", 101.0, when, lambda _: ("flat", 0.2)) == 1
+    assert ledger.lifetime_cost("import") == pytest.approx(0.2)
+
+
+@pytest.mark.parametrize("rate", [float("nan"), float("inf"), -0.1])
+def test_band_rates_must_be_finite_and_nonnegative(rate):
+    assert (
+        engine.validate_bands([Band(name="flat", start=0, end=24, rate=rate)])
+        == "negative_rate"
+    )
+
+
+def test_band_names_must_not_collide_after_entity_name_normalization():
+    bands = [
+        Band(name="Off peak", start=0, end=12, rate=0.1),
+        Band(name="off_peak", start=12, end=24, rate=0.2),
+    ]
+    assert engine.validate_bands(bands) == "duplicate_names"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"daily_supply": float("nan")},
+        {"daily_membership": -1},
+        {"demand_kw": {"2026-13": 5}},
+        {"demand_block_minutes": 7},
+    ],
+)
+def test_persisted_plan_values_are_validated(changes):
+    with pytest.raises(ValueError):
+        Plan(
+            effective_from=date(2026, 1, 1),
+            import_schedule=Schedule([Band(name="flat", start=0, end=24, rate=0.2)]),
+            **changes,
+        )
+
+
+def test_stepped_export_incremental_bookings_match_one_daily_booking():
+    plan = Plan(
+        effective_from=date(2026, 1, 1),
+        import_schedule=Schedule([Band(name="flat", start=0, end=24, rate=0.2)]),
+        export_schedule=Schedule([Band(name="fit", start=0, end=24, rate=0.1)]),
+        export_daily_cap=2,
+        export_over_cap_rate=0.03,
+    )
+    incremental, daily = UsageLedger(), UsageLedger()
+    day = date(2026, 11, 7)
+    engine.book_export_day(incremental, "export", day, 1.5, plan)
+    engine.book_export_day(incremental, "export", day, 1.5, plan)
+    engine.book_export_day(daily, "export", day, 3, plan)
+    assert incremental.days == daily.days
+    assert incremental.lifetime_cost("export") == pytest.approx(0.23)
+
+
+def test_misaligned_five_minute_rows_do_not_form_a_complete_demand_block():
+    slots = [(datetime(2026, 11, 7, 17, minute), 1.0) for minute in range(1, 7)]
+    assert engine.block_peaks(slots, start_hour=16, end_hour=21, block_minutes=30) == {}
+
+
+def test_daylight_saving_fold_keeps_distinct_demand_blocks():
+    zone = ZoneInfo("Australia/Sydney")
+    slots = [
+        (datetime(2026, 4, 5, 2, minute, tzinfo=zone, fold=fold), kwh)
+        for fold, kwh in ((0, 0.1), (1, 0.2))
+        for minute in range(0, 30, 5)
+    ]
+    kw, at = engine.block_peaks(slots, start_hour=0, end_hour=4, block_minutes=30)[
+        "2026-04"
+    ]
+    assert kw == pytest.approx(2.4)
+    assert at.fold == 1

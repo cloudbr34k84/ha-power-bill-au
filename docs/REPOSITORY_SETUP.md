@@ -23,6 +23,11 @@ The HACS action validates remote repository settings as well as local files. Its
 checks need the repository to exist with a description, topics, issues enabled and an
 identifiable license. Local brand assets are included under `custom_components/power_bill/brand/`.
 
+The local layout is HACS-compatible and `hacs.json` explicitly sets `content_in_root: false`.
+All runtime files stay under the single `custom_components/power_bill/` directory. A private
+GitHub repository cannot be installed with HACS; changing its visibility to public is a
+separate publication step that exposes its committed files and history.
+
 ## First publication
 
 From this directory, inspect `git status --short --untracked-files=all` and confirm the files
@@ -46,7 +51,8 @@ out of remote URLs.
 
 ## Checks and first release
 
-1. Confirm the **Validate** workflow passes its **HACS**, **Hassfest** and **Tests** jobs.
+1. Confirm the **Validate** workflow passes its **HACS** and **Hassfest** jobs, and the
+   **Tests** workflow passes **Tests (Home Assistant 2026.11.0)**.
 2. Once these checks have run, require them for pull requests to `main` if branch protection
    is desired. Repository administrators configure this in GitHub settings.
 3. Follow the release checklist in [CONTRIBUTING.md](../CONTRIBUTING.md). The first manifest

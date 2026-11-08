@@ -32,6 +32,7 @@ from .runtime import TariffRuntime
 class TariffSensorDescription(SensorEntityDescription):
     value_fn: Callable[[TariffRuntime], Any]
     attrs_fn: Callable[[TariffRuntime], dict[str, Any]] | None = None
+    source: str | None = None
 
 
 def _current_attrs(rt: TariffRuntime) -> dict[str, Any]:
@@ -39,7 +40,9 @@ def _current_attrs(rt: TariffRuntime) -> dict[str, Any]:
     return {"rate_inc_gst": round(rate, 4), "next_change": f"{until:02d}:00"}
 
 
-def _money(key: str, name: str, fn: Callable[[TariffRuntime], Any]) -> TariffSensorDescription:
+def _money(
+    key: str, name: str, fn: Callable[[TariffRuntime], Any], *, source: str = "import"
+) -> TariffSensorDescription:
     return TariffSensorDescription(
         key=key,
         name=name,
@@ -48,10 +51,13 @@ def _money(key: str, name: str, fn: Callable[[TariffRuntime], Any]) -> TariffSen
         state_class=SensorStateClass.TOTAL,  # monetary sensors only accept total or none
         suggested_display_precision=2,
         value_fn=fn,
+        source=source,
     )
 
 
-def _lifetime(key: str, name: str, fn: Callable[[TariffRuntime], Any]) -> TariffSensorDescription:
+def _lifetime(
+    key: str, name: str, fn: Callable[[TariffRuntime], Any], *, source: str = "import"
+) -> TariffSensorDescription:
     """Cumulative cost, for the Energy dashboard. Only ever rises, so state class is total."""
     return TariffSensorDescription(
         key=key,
@@ -61,10 +67,13 @@ def _lifetime(key: str, name: str, fn: Callable[[TariffRuntime], Any]) -> Tariff
         state_class=SensorStateClass.TOTAL,  # monetary only accepts total (not total_increasing)
         suggested_display_precision=2,
         value_fn=fn,
+        source=source,
     )
 
 
-def _kwh(key: str, name: str, fn: Callable[[TariffRuntime], Any]) -> TariffSensorDescription:
+def _kwh(
+    key: str, name: str, fn: Callable[[TariffRuntime], Any], *, source: str
+) -> TariffSensorDescription:
     """kWh in a band for today or the month to date. Resets each period, like a utility meter."""
     return TariffSensorDescription(
         key=key,
@@ -74,6 +83,7 @@ def _kwh(key: str, name: str, fn: Callable[[TariffRuntime], Any]) -> TariffSenso
         state_class=SensorStateClass.TOTAL_INCREASING,
         suggested_display_precision=2,
         value_fn=fn,
+        source=source,
     )
 
 
@@ -82,22 +92,37 @@ def _slug(text: str) -> str:
 
 
 def _band_descriptions(rt: TariffRuntime) -> list[TariffSensorDescription]:
-    """kWh today and month to date for each band of the plan now in force."""
-    plan = rt.timeline.plans[-1]
-    sources = [("import", "Import", plan.import_schedule)]
-    if rt.export_entity and plan.export_schedule is not None:
-        sources.append(("export", "Export", plan.export_schedule))
+    """Keep band sensors across dated plans, including future plan transitions."""
+    groups: dict[tuple[str, str], set[str]] = {}
+    for plan in rt.timeline.plans:
+        schedules = [("import", plan.import_schedule)]
+        if rt.export_entity and plan.export_schedule is not None:
+            schedules.append(("export", plan.export_schedule))
+        for source, schedule in schedules:
+            names = [band.name for band in schedule.bands]
+            if source == "export" and plan.export_daily_cap:
+                names = ["fit_step_1", "fit_step_2"]
+            for name in names:
+                groups.setdefault((source, _slug(name)), set()).add(name)
     out: list[TariffSensorDescription] = []
-    for source, label, schedule in sources:
-        for band in schedule.bands:
-            slug = _slug(band.name)
-            pretty = band.name.replace("_", " ")
-            for scope, scope_label in (("today", "today"), ("month", "month to date")):
-                out.append(_kwh(
+    for (source, slug), names in groups.items():
+        pretty = sorted(names)[0].replace("_", " ")
+        for scope, scope_label in (("today", "today"), ("month", "month to date")):
+            out.append(
+                _kwh(
                     f"{source}_kwh_{slug}_{scope}",
-                    f"{label} {pretty} kWh {scope_label}",
-                    lambda r, s=source, b=band.name, sc=scope: round(r.band_kwh(s, sc).get(b, 0.0), 3),
-                ))
+                    f"{source.capitalize()} {pretty} kWh {scope_label}",
+                    lambda r, s=source, bs=tuple(names), sc=scope: round(
+                        sum(
+                            value
+                            for band, value in r.band_kwh(s, sc).items()
+                            if band in bs
+                        ),
+                        3,
+                    ),
+                    source=source,
+                )
+            )
     return out
 
 
@@ -119,42 +144,91 @@ def _descriptions(rt: TariffRuntime) -> list[TariffSensorDescription]:
             icon="mdi:currency-usd",
             value_fn=lambda r: round(r.current()[1], 4),
         ),
-        _money("import_cost_today", "Import cost today", lambda r: r.summary()["import_today"]),
-        _money("import_cost_month", "Import cost month to date", lambda r: r.summary()["import_month"]),
+        _money(
+            "import_cost_today",
+            "Import cost today",
+            lambda r: r.summary()["import_today"],
+        ),
+        _money(
+            "import_cost_month",
+            "Import cost month to date",
+            lambda r: r.summary()["import_month"],
+        ),
         _money("net_cost_today", "Net cost today", lambda r: r.summary()["net_today"]),
-        _money("net_cost_month", "Net cost month to date", lambda r: r.summary()["net_month"]),
+        _money(
+            "net_cost_month",
+            "Net cost month to date",
+            lambda r: r.summary()["net_month"],
+        ),
     ]
-    if rt.timeline.plans[-1].demand_rate > 0:  # only while the current plan has a demand charge
-        descriptions.append(TariffSensorDescription(
-            key="demand_kw",
-            name="Peak demand this month",
-            native_unit_of_measurement="kW",
-            device_class=SensorDeviceClass.POWER,
-            state_class=SensorStateClass.MEASUREMENT,
-            suggested_display_precision=1,
-            icon="mdi:flash-alert-outline",
-            value_fn=lambda r: (r.demand_status() or {}).get("kw"),
-            attrs_fn=lambda r: {k: v for k, v in (r.demand_status() or {}).items() if k != "kw"},
-        ))
-    descriptions.append(_lifetime("import_cost_total", "Import cost total", lambda r: r.lifetime_import()))
-    if rt.export_entity and rt.timeline.plans[-1].export_schedule is not None:
+    if any(plan.demand_rate > 0 for plan in rt.timeline.plans):
+        descriptions.append(
+            TariffSensorDescription(
+                key="demand_kw",
+                name="Peak demand this month",
+                native_unit_of_measurement="kW",
+                device_class=SensorDeviceClass.POWER,
+                state_class=SensorStateClass.MEASUREMENT,
+                suggested_display_precision=1,
+                icon="mdi:flash-alert-outline",
+                value_fn=lambda r: (r.demand_status() or {}).get("kw"),
+                attrs_fn=lambda r: {
+                    k: v for k, v in (r.demand_status() or {}).items() if k != "kw"
+                },
+                source="import",
+            )
+        )
+    descriptions.append(
+        _lifetime(
+            "import_cost_total", "Import cost total", lambda r: r.lifetime_import()
+        )
+    )
+    if rt.export_entity:
         descriptions += [
-            _money("export_credit_today", "Export credit today", lambda r: r.summary()["export_today"]),
-            _money("export_credit_month", "Export credit month to date", lambda r: r.summary()["export_month"]),
-            _lifetime("export_credit_total", "Export credit total", lambda r: r.lifetime_export()),
+            _money(
+                "export_credit_today",
+                "Export credit today",
+                lambda r: r.summary()["export_today"],
+                source="export",
+            ),
+            _money(
+                "export_credit_month",
+                "Export credit month to date",
+                lambda r: r.summary()["export_month"],
+                source="export",
+            ),
+            _lifetime(
+                "export_credit_total",
+                "Export credit total",
+                lambda r: r.lifetime_export(),
+                source="export",
+            ),
         ]
     for device in rt.device_entities:
         slug = device.split(".", 1)[-1]
         state = rt.hass.states.get(device)
         friendly = state.attributes.get("friendly_name") if state else None
         label = friendly or slug.replace("_", " ").capitalize()
+        key = rt.device_sensor_key(device)
         descriptions += [
-            _money(f"device_{slug}_today", f"{label} cost today",
-                   lambda r, d=device: r.device_costs(d)[0]),
-            _money(f"device_{slug}_month", f"{label} cost month to date",
-                   lambda r, d=device: r.device_costs(d)[1]),
-            _lifetime(f"device_{slug}_total", f"{label} cost total",
-                      lambda r, d=device: r.lifetime_device(d)),
+            _money(
+                f"{key}_today",
+                f"{label} cost today",
+                lambda r, d=device: r.device_costs(d)[0],
+                source=device,
+            ),
+            _money(
+                f"{key}_month",
+                f"{label} cost month to date",
+                lambda r, d=device: r.device_costs(d)[1],
+                source=device,
+            ),
+            _lifetime(
+                f"{key}_total",
+                f"{label} cost total",
+                lambda r, d=device: r.lifetime_device(d),
+                source=device,
+            ),
         ]
     return descriptions + _band_descriptions(rt)
 
@@ -184,6 +258,12 @@ class TariffSensor(SensorEntity):
         )
 
     @property
+    def available(self) -> bool:
+        """Keep tariff information available while marking missing meter data honestly."""
+        source = self.entity_description.source
+        return source is None or self._runtime.source_available(source)
+
+    @property
     def native_value(self) -> Any:
         return self.entity_description.value_fn(self._runtime)
 
@@ -206,7 +286,7 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     runtime = entry.runtime_data
-    name = provider_name(entry.data)
+    name = provider_name({**entry.data, **entry.options})
     descriptions = _descriptions(runtime)
 
     # drop sensors of devices that are no longer tracked, so they don't linger as unavailable
@@ -217,5 +297,6 @@ async def async_setup_entry(
             registry.async_remove(entity.entity_id)
 
     async_add_entities(
-        TariffSensor(entry.entry_id, runtime, description, name) for description in descriptions
+        TariffSensor(entry.entry_id, runtime, description, name)
+        for description in descriptions
     )

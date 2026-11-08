@@ -9,7 +9,7 @@
     "recorder"
   ],
   "documentation": "https://github.com/cloudbr34k84/power-bill",
-  "integration_type": "service",
+  "integration_type": "helper",
   "iot_class": "calculated",
   "issue_tracker": "https://github.com/cloudbr34k84/power-bill/issues",
   "requirements": [],

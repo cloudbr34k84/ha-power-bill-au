@@ -9,9 +9,11 @@ https://github.com/tonylofgren/aurora-smart-home
 
 from __future__ import annotations
 
+import math
+import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 KEEP_DAYS = 45
 GST_RATE = 0.10
@@ -37,14 +39,21 @@ def validate_bands(bands: Iterable[Band]) -> str | None:
     bands = list(bands)
     if not bands:
         return "no_bands"
-    names = [b.name.strip() for b in bands]
+    if any(not isinstance(band.name, str) for band in bands):
+        return "duplicate_names"
+    names = [re.sub(r"[^a-z0-9]+", "_", b.name.lower()).strip("_") for b in bands]
     if any(not n for n in names) or len(set(names)) != len(names):
         return "duplicate_names"
     covered: set[int] = set()
     for band in bands:
-        if not (0 <= band.start <= 23 and 1 <= band.end <= 24) or band.start == band.end:
+        if type(band.start) is not int or type(band.end) is not int:
             return "invalid_window"
-        if band.rate < 0:
+        if (
+            not (0 <= band.start <= 23 and 1 <= band.end <= 24)
+            or band.start == band.end
+        ):
+            return "invalid_window"
+        if not math.isfinite(band.rate) or band.rate < 0:
             return "negative_rate"
         for hour in band.hours():
             if hour in covered:
@@ -96,14 +105,46 @@ class Plan:
     daily_membership: float = 0.0
     rates_include_gst: bool = True
     gst_rate: float = GST_RATE
-    export_daily_cap: float = 0.0  # kWh per day credited at the export band rate; 0 = no daily cap
-    export_over_cap_rate: float = 0.0  # $/kWh for export above the daily cap (the step-2 feed-in rate)
+    export_daily_cap: float = (
+        0.0  # kWh per day credited at the export band rate; 0 = no daily cap
+    )
+    export_over_cap_rate: float = (
+        0.0  # $/kWh for export above the daily cap (the step-2 feed-in rate)
+    )
     demand_rate: float = 0.0  # $ per kW per day, e.g. 0.185
     demand_kw: dict[str, float] = field(default_factory=dict)  # "YYYY-MM" -> billed kW
-    demand_estimate: bool = False  # estimate kW from meter data for months with no billed figure
+    demand_estimate: bool = (
+        False  # estimate kW from meter data for months with no billed figure
+    )
     demand_window_start: int = 16  # demand is only measured from this hour...
     demand_window_end: int = 21  # ...until this hour (exclusive, 1-24)
     demand_block_minutes: int = 30  # length of the averaging block the retailer uses
+
+    def __post_init__(self) -> None:
+        """Reject invalid persisted tariffs as well as invalid form submissions."""
+        amounts = (
+            self.daily_supply,
+            self.daily_membership,
+            self.gst_rate,
+            self.export_daily_cap,
+            self.export_over_cap_rate,
+            self.demand_rate,
+            *self.demand_kw.values(),
+        )
+        if any(not math.isfinite(amount) or amount < 0 for amount in amounts):
+            raise ValueError("invalid_amount")
+        if not 0 <= self.demand_window_start < self.demand_window_end <= 24:
+            raise ValueError("invalid_demand_window")
+        if self.demand_block_minutes not in (5, 15, 30, 60):
+            raise ValueError("invalid_demand_window")
+        for month in self.demand_kw:
+            if not re.fullmatch(r"\d{4}-\d{2}", month):
+                raise ValueError("invalid_demand")
+            date.fromisoformat(f"{month}-01")
+        if self.export_daily_cap and (
+            self.export_schedule is None or len(self.export_schedule.bands) != 1
+        ):
+            raise ValueError("needs_single_band")
 
     @property
     def import_factor(self) -> float:
@@ -114,7 +155,9 @@ class Plan:
     def fixed_per_day(self) -> float:
         return (self.daily_supply + self.daily_membership) * self.import_factor
 
-    def demand_kw_for(self, month: str, estimates: dict[str, float] | None = None) -> float:
+    def demand_kw_for(
+        self, month: str, estimates: dict[str, float] | None = None
+    ) -> float:
         """kW charged for a month: the billed figure if there is one, else the estimate (if enabled)."""
         billed = self.demand_kw.get(month)
         if billed is not None:
@@ -123,12 +166,16 @@ class Plan:
             return estimates.get(month, 0.0)
         return 0.0
 
-    def demand_per_day(self, day: date, estimates: dict[str, float] | None = None) -> float:
+    def demand_per_day(
+        self, day: date, estimates: dict[str, float] | None = None
+    ) -> float:
         """Demand charge per day for that month's kW (0 when the month has none)."""
         kw = self.demand_kw_for(day.strftime("%Y-%m"), estimates)
         return kw * self.demand_rate * self.import_factor
 
-    def charge_per_day(self, day: date, estimates: dict[str, float] | None = None) -> float:
+    def charge_per_day(
+        self, day: date, estimates: dict[str, float] | None = None
+    ) -> float:
         """Everything booked once per day: supply, membership and demand."""
         return self.fixed_per_day + self.demand_per_day(day, estimates)
 
@@ -137,7 +184,9 @@ class Timeline:
     """Plans ordered by start date. Each day (and each reading) is priced by the plan in force."""
 
     def __init__(self, plans: Iterable[Plan]) -> None:
-        self.plans: tuple[Plan, ...] = tuple(sorted(plans, key=lambda p: p.effective_from))
+        self.plans: tuple[Plan, ...] = tuple(
+            sorted(plans, key=lambda p: p.effective_from)
+        )
         if not self.plans:
             raise ValueError("no_plans")
         starts = [p.effective_from for p in self.plans]
@@ -195,6 +244,16 @@ class UsageLedger:
             month: {"kw": float(peak["kw"]), "at": str(peak["at"])}
             for month, peak in data.get("demand_peaks", {}).items()
         }
+        numbers = [*self.last_seen.values(), *self.fixed_days.values()]
+        for cell in self.totals.values():
+            numbers.extend(cell.values())
+        for days in self.days.values():
+            for bands in days.values():
+                for cell in bands.values():
+                    numbers.extend(cell.values())
+        numbers.extend(float(peak["kw"]) for peak in self.demand_peaks.values())
+        if any(not math.isfinite(value) or value < 0 for value in numbers):
+            raise ValueError("invalid_saved_usage")
 
     def to_dict(self) -> dict:
         return {
@@ -224,7 +283,9 @@ class UsageLedger:
                 changed.add(month)
         return changed
 
-    def reprice_fixed_days(self, months: set[str], amount_for: Callable[[date], float]) -> int:
+    def reprice_fixed_days(
+        self, months: set[str], amount_for: Callable[[date], float]
+    ) -> int:
         """Re-book the daily charge of every kept day in `months` (used when a demand estimate
         rises, so each day of the month carries the same demand charge). Returns days changed."""
         changed = 0
@@ -239,11 +300,19 @@ class UsageLedger:
                 changed += 1
         return changed
 
-    def add_energy(self, source: str, day: date, band: str, kwh: float, price: float) -> None:
+    def add_energy(
+        self, source: str, day: date, band: str, kwh: float, price: float
+    ) -> None:
         """Add kWh that were priced at `price` per kWh (already GST-adjusted if needed)."""
+        if not all(math.isfinite(value) and value >= 0 for value in (kwh, price)):
+            raise ValueError("invalid_amount")
         cost = kwh * price
-        cell = self.days.setdefault(source, {}).setdefault(day.isoformat(), {}).setdefault(
-            band, _empty_cell()
+        if not math.isfinite(cost):
+            raise ValueError("invalid_amount")
+        cell = (
+            self.days.setdefault(source, {})
+            .setdefault(day.isoformat(), {})
+            .setdefault(band, _empty_cell())
         )
         cell["kwh"] += kwh
         cell["cost"] += cost
@@ -251,26 +320,44 @@ class UsageLedger:
         total["kwh"] += kwh
         total["cost"] += cost
 
+    def reading_delta(
+        self, source: str, value: float, *, reset_on_decrease: bool = True
+    ) -> float:
+        """Update a meter baseline without letting invalid readings corrupt it."""
+        if not math.isfinite(value) or value < 0:
+            return 0.0
+        previous = self.last_seen.get(source)
+        self.last_seen[source] = value
+        if previous is None:
+            return 0.0
+        if value < previous:
+            return value if reset_on_decrease else 0.0
+        return value - previous
+
     def record(
-        self, source: str, value: float, when: datetime, pricer: Callable[[datetime], tuple[str, float]]
+        self,
+        source: str,
+        value: float,
+        when: datetime,
+        pricer: Callable[[datetime], tuple[str, float]],
+        *,
+        reset_on_decrease: bool = True,
     ) -> float:
         """Price the increase in a total_increasing reading at `when`.
 
         `pricer(when)` returns (band name, price per kWh) for the plan in force then.
         Returns the kWh added. The first reading only sets the baseline.
         """
-        previous = self.last_seen.get(source)
-        self.last_seen[source] = value
-        if previous is None:
-            return 0.0
-        delta = value - previous if value >= previous else value  # meter reset
+        delta = self.reading_delta(source, value, reset_on_decrease=reset_on_decrease)
         if delta <= 0:
             return 0.0
         band_name, price = pricer(when)
         self.add_energy(source, when.date(), band_name, delta, price)
         return delta
 
-    def ensure_fixed_through(self, today: date, amount_for: Callable[[date], float]) -> int:
+    def ensure_fixed_through(
+        self, today: date, amount_for: Callable[[date], float]
+    ) -> int:
         """Book the daily charge for every day up to `today` that has not been booked yet.
 
         On the first run this starts at the 1st of the current month. After that it fills
@@ -278,7 +365,9 @@ class UsageLedger:
         Returns how many days were booked.
         """
         if self.fixed_days:
-            start = max(date.fromisoformat(d) for d in self.fixed_days) + timedelta(days=1)
+            start = max(date.fromisoformat(d) for d in self.fixed_days) + timedelta(
+                days=1
+            )
         else:
             start = date(today.year, today.month, 1)
         booked = 0
@@ -305,8 +394,12 @@ class UsageLedger:
         return self.totals.get(source, _empty_cell())["cost"]
 
 
-def book_hourly(ledger: "UsageLedger", source: str, hours: Iterable[tuple[datetime, float]],
-                pricer: Callable[[datetime], tuple[str, float]]) -> float:
+def book_hourly(
+    ledger: UsageLedger,
+    source: str,
+    hours: Iterable[tuple[datetime, float]],
+    pricer: Callable[[datetime], tuple[str, float]],
+) -> float:
     """Book (hour, kWh) pairs at the price in force for each hour. Returns total kWh booked."""
     total = 0.0
     for when, kwh in hours:
@@ -318,21 +411,27 @@ def book_hourly(ledger: "UsageLedger", source: str, hours: Iterable[tuple[dateti
     return total
 
 
-def book_export_day(ledger: "UsageLedger", source: str, day: date, total_kwh: float, plan: "Plan") -> None:
-    """Credit one day's export under a plan with a daily cap: the first `cap` kWh at the band
-    rate (step 1), anything above at the over-cap rate (step 2)."""
+def book_export_day(
+    ledger: UsageLedger, source: str, day: date, total_kwh: float, plan: Plan
+) -> None:
+    """Credit an export increment, sharing the daily cap with earlier increments."""
     if total_kwh <= 0 or plan.export_schedule is None:
         return
     step1_rate = plan.export_schedule.band_at(12).rate
-    kwh1 = min(total_kwh, plan.export_daily_cap)
-    kwh2 = max(total_kwh - plan.export_daily_cap, 0.0)
+    already = sum(
+        cell["kwh"]
+        for cell in ledger.days.get(source, {}).get(day.isoformat(), {}).values()
+    )
+    kwh1 = min(total_kwh, max(plan.export_daily_cap - already, 0.0))
+    kwh2 = total_kwh - kwh1
     ledger.add_energy(source, day, "fit_step_1", kwh1, step1_rate)
     if kwh2 > 0:
         ledger.add_energy(source, day, "fit_step_2", kwh2, plan.export_over_cap_rate)
 
 
-def book_fixed_range(ledger: "UsageLedger", first: date, last: date,
-                     amount_for: Callable[[date], float]) -> int:
+def book_fixed_range(
+    ledger: UsageLedger, first: date, last: date, amount_for: Callable[[date], float]
+) -> int:
     """Book the daily charge for every day from `first` to `last` inclusive, once per day."""
     booked = 0
     day = first
@@ -361,20 +460,39 @@ def block_peaks(
     the clock (a 30-minute block starts at :00 or :30). A block counts only when it lies wholly
     inside the window and every slot in it is present, so a gap can't hide or invent a peak.
     """
-    if block_minutes < slot_minutes or block_minutes % slot_minutes or not (0 <= start_hour < end_hour <= 24):
+    if (
+        block_minutes < slot_minutes
+        or block_minutes % slot_minutes
+        or not (0 <= start_hour < end_hour <= 24)
+    ):
         return {}
     per_block = block_minutes // slot_minutes
     lo, hi = start_hour * 60, end_hour * 60
     blocks: dict[datetime, dict[datetime, float]] = {}
+    local_starts: dict[datetime, datetime] = {}
     for start, kwh in slots:
+        if not math.isfinite(kwh) or kwh < 0:
+            continue
+        if start.second or start.microsecond or start.minute % slot_minutes:
+            continue
         minute = start.hour * 60 + start.minute
         first = minute - minute % block_minutes
         if first < lo or first + block_minutes > hi:
             continue
-        block_start = start.replace(hour=first // 60, minute=first % 60, second=0, microsecond=0)
-        blocks.setdefault(block_start, {})[start] = kwh
+        block_start = start.replace(
+            hour=first // 60, minute=first % 60, second=0, microsecond=0
+        )
+        key = (
+            block_start.astimezone(UTC)
+            if block_start.tzinfo is not None
+            else block_start
+        )
+        slot = start.astimezone(UTC) if start.tzinfo is not None else start
+        local_starts[key] = block_start
+        blocks.setdefault(key, {})[slot] = kwh
     peaks: dict[str, tuple[float, datetime]] = {}
-    for block_start, members in blocks.items():
+    for key, members in blocks.items():
+        block_start = local_starts[key]
         if len(members) != per_block:
             continue
         kw = sum(members.values()) * 60.0 / block_minutes
@@ -385,7 +503,9 @@ def block_peaks(
 
 
 def _month_days(today: date) -> list[str]:
-    return [date(today.year, today.month, d).isoformat() for d in range(1, today.day + 1)]
+    return [
+        date(today.year, today.month, d).isoformat() for d in range(1, today.day + 1)
+    ]
 
 
 def _cost(ledger: UsageLedger, source: str, days: Iterable[str]) -> float:
@@ -397,7 +517,9 @@ def _fixed(ledger: UsageLedger, days: Iterable[str]) -> float:
     return sum(ledger.fixed_days.get(day, 0.0) for day in days)
 
 
-def band_kwh(ledger: UsageLedger, source: str, today: date, scope: str) -> dict[str, float]:
+def band_kwh(
+    ledger: UsageLedger, source: str, today: date, scope: str
+) -> dict[str, float]:
     """kWh per band for today ("today") or the month to date ("month")."""
     days = [today.isoformat()] if scope == "today" else _month_days(today)
     totals: dict[str, float] = {}

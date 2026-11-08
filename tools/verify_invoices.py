@@ -16,7 +16,7 @@ import pathlib
 import re
 import sys
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 
 LINE = re.compile(
     r"^(?P<name>.+?)\s+(?P<start>\d{2}/\d{2}/\d{4}) - (?P<end>\d{2}/\d{2}/\d{4})\s+"
@@ -37,7 +37,6 @@ def money(text: str) -> float:
 
 def period_start(text: str) -> date:
     """Start of a header range such as '1 April - 30 April 2025' (year is at the end)."""
-    from datetime import datetime
     year = re.search(r"(\d{4})\s*$", text).group(1)
     first = re.match(r"\s*(\d+ \w+)", text).group(1)
     return datetime.strptime(f"{first} {year}", "%d %B %Y").date()
@@ -53,25 +52,56 @@ class Era:
     name: str
     start: date
     end: date
-    rates: dict[str, float]  # keyword in line name -> expected rate (as printed, inc GST)
+    rates: dict[
+        str, float
+    ]  # keyword in line name -> expected rate (as printed, inc GST)
 
 
 # Rates as printed on the bills. Keyword matching is case-insensitive substring.
 ERAS = [
-    Era("flat-rate (single day rate, tiered FiT)", date(2025, 4, 1), date(2025, 7, 13), {
-        "Peak Usage": 0.2200, "Membership": 0.5422, "Supply Charge": 1.0900,
-        "Demand": 0.1850, "Solar FiT - Step 1": -0.0700, "Solar FiT - Step 2": -0.0300,
-    }),
-    Era("16-21 peak 0.41 / 11-16 shoulder 0.20 / off-peak 0.25", date(2025, 7, 14), date(2026, 6, 30), {
-        "Peak Usage": 0.4100, "Shoulder Usage": 0.2000, "Off Peak Usage": 0.2500,
-        "Membership": 0.5422, "Supply Charge": 1.1550,
-        "Solar FiT Off-Peak": -0.0500, "Solar FiT Peak": -0.1500, "Solar FiT Shoulder": -0.0200,
-    }),
-    Era("16-21 peak 0.3758 / 0-11,21-24 shoulder 0.2276 / 11-16 off-peak 0.1657", date(2026, 7, 1), date(2030, 12, 31), {
-        "Peak Usage": 0.3758, "Shoulder Usage": 0.2276, "Off Peak Usage": 0.1657,
-        "Membership": 0.5422, "Supply Charge": 1.4491,
-        "Solar FiT Off-Peak": -0.0350, "Solar FiT Peak": -0.1000, "Solar FiT Shoulder": -0.0150,
-    }),
+    Era(
+        "flat-rate (single day rate, tiered FiT)",
+        date(2025, 4, 1),
+        date(2025, 7, 13),
+        {
+            "Peak Usage": 0.2200,
+            "Membership": 0.5422,
+            "Supply Charge": 1.0900,
+            "Demand": 0.1850,
+            "Solar FiT - Step 1": -0.0700,
+            "Solar FiT - Step 2": -0.0300,
+        },
+    ),
+    Era(
+        "16-21 peak 0.41 / 11-16 shoulder 0.20 / off-peak 0.25",
+        date(2025, 7, 14),
+        date(2026, 6, 30),
+        {
+            "Peak Usage": 0.4100,
+            "Shoulder Usage": 0.2000,
+            "Off Peak Usage": 0.2500,
+            "Membership": 0.5422,
+            "Supply Charge": 1.1550,
+            "Solar FiT Off-Peak": -0.0500,
+            "Solar FiT Peak": -0.1500,
+            "Solar FiT Shoulder": -0.0200,
+        },
+    ),
+    Era(
+        "16-21 peak 0.3758 / 0-11,21-24 shoulder 0.2276 / 11-16 off-peak 0.1657",
+        date(2026, 7, 1),
+        date(2030, 12, 31),
+        {
+            "Peak Usage": 0.3758,
+            "Shoulder Usage": 0.2276,
+            "Off Peak Usage": 0.1657,
+            "Membership": 0.5422,
+            "Supply Charge": 1.4491,
+            "Solar FiT Off-Peak": -0.0350,
+            "Solar FiT Peak": -0.1000,
+            "Solar FiT Shoulder": -0.0150,
+        },
+    ),
 ]
 
 
@@ -92,7 +122,11 @@ def expected_rate(era: Era, name: str) -> float | None:
 
 def check_file(path: pathlib.Path) -> dict:
     text = path.read_text()
-    charges = [m for m in LINE.finditer(text) if not m.group("name").startswith("* ") and not m.group("cr")]
+    charges = [
+        m
+        for m in LINE.finditer(text)
+        if not m.group("name").startswith("* ") and not m.group("cr")
+    ]
     credits = [m for m in LINE.finditer(text) if m.group("cr")]
     issues: list[str] = []
 
@@ -108,11 +142,15 @@ def check_file(path: pathlib.Path) -> dict:
         if want is None:
             issues.append(f"no rate in era for '{name}'")
         elif abs(rate - want) > 1e-6:
-            issues.append(f"{name} {m.group('start')} rate {rate} != expected {want} ({era.name})")
+            issues.append(
+                f"{name} {m.group('start')} rate {rate} != expected {want} ({era.name})"
+            )
         if m.group("unit") == "kWh":
             qty = money(m.group("qty"))
             if abs(qty * rate - amt) > 0.05:
-                issues.append(f"{name} {m.group('start')}: {qty} x {rate} = {qty*rate:.2f}, bill says {amt}")
+                issues.append(
+                    f"{name} {m.group('start')}: {qty} x {rate} = {qty * rate:.2f}, bill says {amt}"
+                )
             if name.startswith("Peak"):
                 peak += qty
             elif name.startswith("Shoulder"):
@@ -128,25 +166,36 @@ def check_file(path: pathlib.Path) -> dict:
     stated_credits = money(TOTAL_CREDITS.search(text).group(1))
     stated_bill = money(TOTAL_BILL.search(text).group(1))
     if abs(line_charge_total - stated_charges) > 0.05:
-        issues.append(f"charge lines sum {line_charge_total:.2f} != Total charges {stated_charges}")
+        issues.append(
+            f"charge lines sum {line_charge_total:.2f} != Total charges {stated_charges}"
+        )
     if abs(line_credit_total - stated_credits) > 0.05:
-        issues.append(f"credit lines sum {line_credit_total:.2f} != Total Credits {stated_credits}")
+        issues.append(
+            f"credit lines sum {line_credit_total:.2f} != Total Credits {stated_credits}"
+        )
     if abs((stated_charges - stated_credits) - stated_bill) > 0.05:
-        issues.append(f"charges - credits {stated_charges - stated_credits:.2f} != Total Bill {stated_bill}")
+        issues.append(
+            f"charges - credits {stated_charges - stated_credits:.2f} != Total Bill {stated_bill}"
+        )
 
     meter = METER_KWH.search(text)
     meter_kwh = money(meter.group(1)) if meter else None
     if meter_kwh is not None and abs(meter_kwh - (peak + shoulder + offpeak)) > 0.5:
-        issues.append(f"band kWh {peak+shoulder+offpeak:.2f} != meter {meter_kwh}")
+        issues.append(f"band kWh {peak + shoulder + offpeak:.2f} != meter {meter_kwh}")
 
     period = PERIOD.search(text)
     return {
         "file": path.name,
         "period": period.group(1) if period else "?",
         "start": period_start(period.group(1)) if period else date(2000, 1, 1),
-        "peak": peak, "shoulder": shoulder, "offpeak": offpeak,
-        "meter_kwh": meter_kwh, "charges": stated_charges, "credits": stated_credits,
-        "bill": stated_bill, "issues": issues,
+        "peak": peak,
+        "shoulder": shoulder,
+        "offpeak": offpeak,
+        "meter_kwh": meter_kwh,
+        "charges": stated_charges,
+        "credits": stated_credits,
+        "bill": stated_bill,
+        "issues": issues,
     }
 
 
@@ -154,12 +203,16 @@ def main(folder: str) -> int:
     rows = [check_file(p) for p in sorted(pathlib.Path(folder).glob("*.txt"))]
     rows.sort(key=lambda r: r["start"])
     bad = 0
-    print(f"{'period':34} {'peak':>8} {'shoul':>8} {'offpk':>8} {'meter':>8} {'charges':>9} {'credits':>8} {'bill':>8}  status")
+    print(
+        f"{'period':34} {'peak':>8} {'shoul':>8} {'offpk':>8} {'meter':>8} {'charges':>9} {'credits':>8} {'bill':>8}  status"
+    )
     for r in rows:
         status = "OK" if not r["issues"] else f"{len(r['issues'])} issue(s)"
         bad += bool(r["issues"])
-        print(f"{r['period']:34} {r['peak']:8.2f} {r['shoulder']:8.2f} {r['offpeak']:8.2f} "
-              f"{(r['meter_kwh'] or 0):8.2f} {r['charges']:9.2f} {r['credits']:8.2f} {r['bill']:8.2f}  {status}")
+        print(
+            f"{r['period']:34} {r['peak']:8.2f} {r['shoulder']:8.2f} {r['offpeak']:8.2f} "
+            f"{(r['meter_kwh'] or 0):8.2f} {r['charges']:9.2f} {r['credits']:8.2f} {r['bill']:8.2f}  {status}"
+        )
         for issue in r["issues"]:
             print(f"    - {issue}")
     print(f"\n{len(rows)} invoices, {bad} with issues")

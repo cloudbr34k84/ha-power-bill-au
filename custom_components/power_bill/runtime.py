@@ -6,7 +6,9 @@ https://github.com/tonylofgren/aurora-smart-home
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import math
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -14,8 +16,8 @@ from typing import Any
 from homeassistant.components.recorder import get_instance
 from homeassistant.components.recorder.statistics import statistics_during_period
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
-from homeassistant.core import Event, HomeAssistant, State, callback
+from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import (
     async_track_state_change_event,
@@ -38,37 +40,43 @@ from .const import (
 )
 from .engine import (
     FIXED_KEY,
-    band_kwh,
-    book_export_day,
-    book_fixed_range,
-    block_peaks,
-    book_hourly,
     Band,
     Plan,
     Schedule,
     Timeline,
     UsageLedger,
+    band_kwh,
+    block_peaks,
+    book_export_day,
+    book_fixed_range,
+    book_hourly,
     current_tariff,
     device_cost,
     summarize,
 )
+from .sources import source_record
+from .validation import energy_value
 
 _LOGGER = logging.getLogger(__name__)
 
 SAVE_DELAY_SECONDS = 30
-MAX_HOURLY_KWH = 30.0  # no house or device sensor draws this in an hour; larger steps are bad statistics
+MAX_HOURLY_KWH = 30.0  # Residential meter spike filter; see README limitations.
 MAX_DAILY_KWH = 300.0
-BACKFILL_START = date(2024, 9, 1)  # first day with verified hourly/daily meter history
-HOURLY_FROM = date(2024, 12, 1)  # the recorder holds hourly statistics from here on
+HISTORY_EPOCH = datetime(1970, 1, 1, tzinfo=dt_util.UTC)
 MAX_SLOT_KWH = 4.0  # 5-minute step above this (48 kW) is bad data, never a real peak
-DEMAND_SCAN_DAYS = 10  # 5-minute statistics are kept about a week; scan a little more at startup
+DEMAND_SCAN_DAYS = (
+    10  # 5-minute statistics are kept about a week; scan a little more at startup
+)
 DEMAND_REFRESH = timedelta(minutes=5)
+PENDING_RETENTION = timedelta(days=1)
 
 
 def _row_start(row: dict[str, Any]) -> datetime:
     """Statistics rows carry the period start as a unix timestamp (seconds or milliseconds)."""
     start = row["start"]
     if isinstance(start, datetime):
+        if start.tzinfo is None:
+            raise ValueError("Statistics timestamps must be timezone aware")
         return start
     ts = float(start)
     if ts > 1e11:  # milliseconds
@@ -76,13 +84,19 @@ def _row_start(row: dict[str, Any]) -> datetime:
     return datetime.fromtimestamp(ts, dt_util.UTC)
 
 
-def _numeric(state: State | None) -> float | None:
-    if state is None or state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
-        return None
-    try:
-        return float(state.state)
-    except ValueError:
-        return None
+def _statistics_result(result: Any) -> dict[str, list[dict[str, Any]]]:
+    """Distinguish an invalid recorder response from legitimately empty history."""
+    if not isinstance(result, dict):
+        raise HomeAssistantError("Recorder returned an invalid statistics response")
+    normalized = {}
+    for statistic_id, rows in result.items():
+        if rows is None:
+            normalized[statistic_id] = []
+        elif isinstance(rows, list):
+            normalized[statistic_id] = rows
+        else:
+            raise HomeAssistantError("Recorder returned invalid statistics rows")
+    return normalized
 
 
 LEGACY_START = date(2000, 1, 1)
@@ -116,7 +130,8 @@ def build_timeline(cfg: dict[str, Any]) -> Timeline:
     single current plan is the whole timeline. Raises ValueError if any plan is invalid."""
     if cfg.get(CONF_PLANS):
         plans = [
-            _plan_from_dict(p, date.fromisoformat(p["effective_from"])) for p in cfg[CONF_PLANS]
+            _plan_from_dict(p, date.fromisoformat(p["effective_from"]))
+            for p in cfg[CONF_PLANS]
         ]
     else:
         plans = [_plan_from_dict(cfg, LEGACY_START)]
@@ -128,7 +143,12 @@ def build_timeline(cfg: dict[str, Any]) -> Timeline:
 class TariffRuntime:
     """Owns the ledger and the state listeners for one config entry."""
 
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, store: Store) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry[TariffRuntime],
+        store: Store[dict[str, Any]],
+    ) -> None:
         cfg = {**entry.data, **entry.options}
         self.hass = hass
         self.entry_id = entry.entry_id
@@ -138,16 +158,28 @@ class TariffRuntime:
         self.export_entity: str | None = cfg.get(CONF_EXPORT_ENTITY) or None
         self.device_entities: list[str] = list(cfg.get(CONF_TRACKED_DEVICES) or [])
         self.ledger = UsageLedger()
-        self._unsubs: list[Any] = []
+        self._unsubs: list[Callable[[], None]] = []
+        self._history_start = dt_util.now().date()
+        self._stored_ledger: UsageLedger | None = None
+        self._demand_lock = asyncio.Lock()
+        self._stopping = False
+        self._pending_energy: dict[str, dict[str, float]] = {}
+        self._history_watermarks: dict[str, datetime] = {}
 
         # entity_id -> (ledger source key, pricer for that source's readings)
-        self._sources: dict[str, tuple[str, Callable[[datetime], tuple[str, float]]]] = {
-            self.import_entity: ("import", self._import_price)
-        }
+        self._sources: dict[
+            str, tuple[str, Callable[[datetime], tuple[str, float]]]
+        ] = {self.import_entity: ("import", self._import_price)}
         if self.export_entity:
             self._sources[self.export_entity] = ("export", self._export_price)
+        self._device_sensor_keys: dict[str, str] = {}
         for device in self.device_entities:
-            self._sources.setdefault(device, (device, self._import_price))
+            record = source_record(entry.data, device)
+            self._device_sensor_keys[device] = record.get("sensor_key") or (
+                f"device_{device.split('.', 1)[-1]}"
+            )
+            ledger_key = record.get("ledger_key") or device
+            self._sources.setdefault(device, (ledger_key, self._import_price))
 
     def _import_price(self, when: datetime) -> tuple[str, float]:
         plan = self.timeline.plan_on(when.date())
@@ -156,7 +188,8 @@ class TariffRuntime:
 
     def _export_price(self, when: datetime) -> tuple[str, float]:
         plan = self.timeline.plan_on(when.date())
-        band = plan.export_schedule.band_at(when.hour)  # validated present when export is set
+        assert plan.export_schedule is not None  # Validated by build_timeline.
+        band = plan.export_schedule.band_at(when.hour)
         return band.name, band.rate
 
     async def async_start(self) -> None:
@@ -167,79 +200,262 @@ class TariffRuntime:
         """
         now = dt_util.now()
         self.ledger = UsageLedger()
+        stored = await self._store.async_load()
+        if isinstance(stored, dict):
+            try:
+                if "history_start" in stored:
+                    self._history_start = min(
+                        date.fromisoformat(stored["history_start"]), now.date()
+                    )
+                    self._stored_ledger = UsageLedger(stored)
+                    self._load_pending(stored.get("pending_energy", {}), now)
+                signatures = set(str(stored.get("demand_signature", "")).split("|"))
+                peaks = UsageLedger(
+                    {"demand_peaks": stored.get("demand_peaks", {})}
+                ).demand_peaks
+                for month, peak in peaks.items():
+                    at = dt_util.parse_datetime(str(peak["at"]))
+                    if at is None or at.tzinfo is None or at > now:
+                        continue
+                    plan = self.timeline.plan_on(dt_util.as_local(at).date())
+                    signature = f"{plan.effective_from}:{plan.demand_window_start}-{plan.demand_window_end}/{plan.demand_block_minutes}"
+                    if plan.demand_estimate and signature in signatures:
+                        self.ledger.demand_peaks[month] = peak
+            except (AttributeError, TypeError, ValueError, KeyError, OverflowError):
+                _LOGGER.warning(
+                    "Ignoring invalid saved tariff data; rebuilding from recorder statistics"
+                )
+                self._history_start = now.date()
+                self._stored_ledger = None
         recorder_ready = "recorder" in self.hass.config.components
         if self._estimating:
-            await self._async_load_peaks()
             if recorder_ready:
                 await self._async_scan_demand(DEMAND_SCAN_DAYS, reprice=False)
         if recorder_ready:
             await self._async_backfill(now)
+            self._replay_pending()
+        elif self._stored_ledger is not None:
+            peaks = self.ledger.demand_peaks
+            self.ledger = self._stored_ledger
+            self.ledger.demand_peaks = peaks
         # live baseline: readings from now on are added as they change
         for entity, (key, _pricer) in self._sources.items():
-            value = _numeric(self.hass.states.get(entity))
+            value = energy_value(self.hass.states.get(entity))
             if value is not None:
                 self.ledger.last_seen[key] = value
         self._ensure_today(now.date())
         self.ledger.prune(now.date())
         self._unsubs.append(
-            async_track_state_change_event(self.hass, list(self._sources), self._on_source_change)
+            async_track_state_change_event(
+                self.hass, list(self._sources), self._on_source_change
+            )
         )
-        self._unsubs.append(async_track_time_interval(self.hass, self._on_tick, timedelta(minutes=1)))
+        self._unsubs.append(
+            async_track_time_interval(self.hass, self._on_tick, timedelta(minutes=1))
+        )
         if self._estimating and recorder_ready:
             self._unsubs.append(
-                async_track_time_interval(self.hass, self._on_demand_tick, DEMAND_REFRESH)
+                async_track_time_interval(
+                    self.hass, self._on_demand_tick, DEMAND_REFRESH
+                )
             )
         self._store.async_delay_save(self._snapshot, SAVE_DELAY_SECONDS)
 
     async def _async_backfill(self, now: datetime) -> None:
-        """Price hourly statistics from BACKFILL_START up to now, plus the daily charges."""
-        start = datetime.combine(BACKFILL_START, datetime.min.time(), tzinfo=now.tzinfo)
-        switch = datetime.combine(HOURLY_FROM, datetime.min.time(), tzinfo=now.tzinfo)
+        """Rebuild available meter history without installation-specific date boundaries."""
         ids = set(self._sources)
         recorder = get_instance(self.hass)
 
-        def fetch(period: str, t0: datetime, t1: datetime) -> dict[str, list[dict[str, Any]]]:
-            return statistics_during_period(
-                self.hass, t0.astimezone(dt_util.UTC), t1.astimezone(dt_util.UTC),
-                ids, period, {"energy": "Wh"}, {"change"},  # Wh for every sensor, whatever its native unit
+        def fetch(
+            period: str, t0: datetime, t1: datetime
+        ) -> dict[str, list[dict[str, Any]]]:
+            return _statistics_result(
+                statistics_during_period(
+                    self.hass,
+                    t0.astimezone(dt_util.UTC),
+                    t1.astimezone(dt_util.UTC),
+                    ids,
+                    period,
+                    {"energy": "Wh"},
+                    {"change"},  # Wh for every sensor, whatever its native unit
+                )
             )
 
-        # the recorder's end time is inclusive, so stop one second short of the hourly era
-        daily = await recorder.async_add_executor_job(fetch, "day", start, switch - timedelta(seconds=1))
-        hourly = await recorder.async_add_executor_job(fetch, "hour", switch, now)
+        daily = await recorder.async_add_executor_job(fetch, "day", HISTORY_EPOCH, now)
+        hourly = await recorder.async_add_executor_job(
+            fetch, "hour", HISTORY_EPOCH, now
+        )
+        await self.hass.async_add_executor_job(self._build_history, daily, hourly, now)
 
-        for entity, (key, pricer) in self._sources.items():
-            capped_days: dict[date, float] = {}  # export on plans with a daily cap, booked per day
-            hours = []
-            for row in hourly.get(entity, []):
-                change = row.get("change")
-                if change is None or abs(change) / 1000.0 > MAX_HOURLY_KWH:
+    def _build_history(
+        self,
+        daily: dict[str, list[dict[str, Any]]],
+        hourly: dict[str, list[dict[str, Any]]],
+        now: datetime,
+    ) -> None:
+        """Build history in an executor before live subscriptions are registered."""
+
+        def valid_rows(
+            rows: list[dict[str, Any]], limit: float
+        ) -> list[tuple[datetime, float]]:
+            result = []
+            for row in rows:
+                try:
+                    change = float(row["change"]) / 1000.0
+                    when = dt_util.as_local(_row_start(row))
+                except (KeyError, TypeError, ValueError, OverflowError, OSError):
                     continue
-                when = dt_util.as_local(_row_start(row))
+                if math.isfinite(change) and 0 <= change <= limit and when <= now:
+                    result.append((when, change))
+            if discarded := len(rows) - len(result):
+                _LOGGER.debug(
+                    "Filtered %d invalid or out-of-range recorder rows", discarded
+                )
+            return result
+
+        first_import: date | None = None
+        for entity, (key, pricer) in self._sources.items():
+            capped_days: dict[
+                date, float
+            ] = {}  # export on plans with a daily cap, booked per day
+            hour_rows = valid_rows(hourly.get(entity, []), MAX_HOURLY_KWH)
+            hourly_days = {when.date() for when, _ in hour_rows}
+            day_rows = [
+                row
+                for row in valid_rows(daily.get(entity, []), MAX_DAILY_KWH)
+                if row[0].date() not in hourly_days
+            ]
+            if key == "import" and (rows := hour_rows + day_rows):
+                first_import = min(when.date() for when, _ in rows)
+            if not hour_rows and not day_rows:
+                _LOGGER.debug(
+                    "No recorder rows for a configured energy source; using saved readings when available"
+                )
+            if not hour_rows and not day_rows and self._stored_ledger is not None:
+                if key in self._stored_ledger.days:
+                    self.ledger.days[key] = self._stored_ledger.days[key]
+                if key in self._stored_ledger.totals:
+                    self.ledger.totals[key] = self._stored_ledger.totals[key]
+                continue
+            ends = [
+                when.astimezone(dt_util.UTC) + timedelta(hours=1)
+                for when, _ in hour_rows
+            ]
+            ends.extend(
+                datetime.combine(
+                    when.date() + timedelta(days=1),
+                    datetime.min.time(),
+                    tzinfo=now.tzinfo,
+                ).astimezone(dt_util.UTC)
+                for when, _ in day_rows
+            )
+            if ends:
+                self._history_watermarks[key] = max(ends)
+            hours = []
+            for when, change in hour_rows:
                 plan = self.timeline.plan_on(when.date())
                 if key == "export" and plan.export_daily_cap > 0:
-                    capped_days[when.date()] = capped_days.get(when.date(), 0.0) + change / 1000.0
+                    capped_days[when.date()] = (
+                        capped_days.get(when.date(), 0.0) + change
+                    )
                     continue
-                hours.append((when, change / 1000.0))
+                hours.append((when, change))
             book_hourly(self.ledger, key, hours, pricer)
-            # before the hourly era only daily totals exist; the plan then was a single rate
-            for row in daily.get(entity, []):
-                change = row.get("change")
-                if change is None or abs(change) / 1000.0 > MAX_DAILY_KWH:
-                    continue
-                day_start = dt_util.as_local(_row_start(row))
+            # Use daily-only history at the noon rate when no hourly detail exists.
+            for day_start, change in day_rows:
                 plan = self.timeline.plan_on(day_start.date())
                 if key == "export" and plan.export_daily_cap > 0:
-                    capped_days[day_start.date()] = capped_days.get(day_start.date(), 0.0) + change / 1000.0
+                    capped_days[day_start.date()] = (
+                        capped_days.get(day_start.date(), 0.0) + change
+                    )
                     continue
                 _name, price = pricer(day_start.replace(hour=12))
-                self.ledger.add_energy(key, day_start.date(), _name, change / 1000.0, price)
+                self.ledger.add_energy(key, day_start.date(), _name, change, price)
             for day, total in capped_days.items():
-                book_export_day(self.ledger, key, day, total, self.timeline.plan_on(day))
+                book_export_day(
+                    self.ledger, key, day, total, self.timeline.plan_on(day)
+                )
+        if first_import is not None:
+            self._history_start = first_import
+        elif self._stored_ledger is not None:
+            _LOGGER.debug(
+                "No import history available; restoring the saved tariff ledger"
+            )
+            self.ledger.fixed_days = self._stored_ledger.fixed_days
+            if FIXED_KEY in self._stored_ledger.totals:
+                self.ledger.totals[FIXED_KEY] = self._stored_ledger.totals[FIXED_KEY]
+            self.ledger.ensure_fixed_through(now.date(), self._daily_charge)
+            self.ledger.reprice_fixed_days(
+                {day[:7] for day in self.ledger.fixed_days}, self._daily_charge
+            )
+            return
+        else:
+            _LOGGER.debug(
+                "No import history available; fixed charges start on the initial setup day"
+            )
         book_fixed_range(
-            self.ledger, BACKFILL_START, now.date(),
-            self._daily_charge,
+            self.ledger, self._history_start, now.date(), self._daily_charge
         )
+
+    def _load_pending(
+        self, pending: dict[str, dict[str, float]], now: datetime
+    ) -> None:
+        """Load a bounded buffer of live increments not yet covered by recorder."""
+        if not isinstance(pending, dict):
+            return
+        allowed = {key for key, _ in self._sources.values()}
+        cutoff = now.astimezone(dt_util.UTC) - PENDING_RETENTION
+        for source, slots in pending.items():
+            if source not in allowed or not isinstance(slots, dict):
+                continue
+            for timestamp, amount in slots.items():
+                try:
+                    at = dt_util.parse_datetime(timestamp)
+                    amount = float(amount)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if at is None or at.tzinfo is None or not cutoff <= at <= now:
+                    continue
+                if math.isfinite(amount) and amount >= 0:
+                    self._pending_energy.setdefault(source, {})[timestamp] = amount
+
+    def _replay_pending(self) -> None:
+        """Replay increments after each source's completed recorder periods once."""
+        pricers = {key: pricer for key, pricer in self._sources.values()}
+        for source, slots in self._pending_energy.items():
+            watermark = self._history_watermarks.get(source)
+            if watermark is None:
+                continue  # This source was restored from its complete saved ledger.
+            for timestamp, amount in sorted(slots.items()):
+                at = dt_util.parse_datetime(timestamp)
+                if at is None or at < watermark:
+                    continue
+                when = dt_util.as_local(at)
+                plan = self.timeline.plan_on(when.date())
+                if source == "export" and plan.export_daily_cap:
+                    book_export_day(self.ledger, source, when.date(), amount, plan)
+                else:
+                    band, rate = pricers[source](when)
+                    self.ledger.add_energy(source, when.date(), band, amount, rate)
+
+    def _remember_increment(self, source: str, when: datetime, amount: float) -> None:
+        """Aggregate live increments into five-minute buckets, bounded to one day."""
+        if amount <= 0:
+            return
+        at = when.astimezone(dt_util.UTC)
+        slot = at.replace(
+            minute=at.minute // 5 * 5, second=0, microsecond=0
+        ).isoformat()
+        slots = self._pending_energy.setdefault(source, {})
+        slots[slot] = slots.get(slot, 0.0) + amount
+        self._prune_pending(when)
+
+    def _prune_pending(self, now: datetime) -> None:
+        cutoff = now.astimezone(dt_util.UTC) - PENDING_RETENTION
+        for slots in self._pending_energy.values():
+            for timestamp in list(slots):
+                if dt_util.parse_datetime(timestamp) < cutoff:
+                    del slots[timestamp]
 
     # ---- demand estimate -------------------------------------------------------------------
 
@@ -251,40 +467,68 @@ class TariffRuntime:
         """Identifies the settings the saved peaks were measured with; a change discards them."""
         return "|".join(
             f"{p.effective_from}:{p.demand_window_start}-{p.demand_window_end}/{p.demand_block_minutes}"
-            for p in self.timeline.plans if p.demand_estimate
+            for p in self.timeline.plans
+            if p.demand_estimate
         )
 
     def _daily_charge(self, day: date) -> float:
-        return self.timeline.plan_on(day).charge_per_day(day, self.ledger.demand_estimates())
-
-    async def _async_load_peaks(self) -> None:
-        stored = await self._store.async_load()
-        if isinstance(stored, dict) and stored.get("demand_signature") == self._signature():
-            self.ledger.demand_peaks = UsageLedger({"demand_peaks": stored.get("demand_peaks", {})}).demand_peaks
+        return self.timeline.plan_on(day).charge_per_day(
+            day, self.ledger.demand_estimates()
+        )
 
     async def _async_scan_demand(self, days: int, *, reprice: bool) -> None:
+        """Serialize scans so an old request cannot overwrite state after unload."""
+        async with self._demand_lock:
+            if not self._stopping:
+                await self._async_scan_demand_locked(days, reprice=reprice)
+
+    async def _async_scan_demand_locked(self, days: int, *, reprice: bool) -> None:
         """Read recent 5-minute import statistics, find each month's highest block, merge it in."""
         now = dt_util.now()
         recorder = get_instance(self.hass)
         entity = self.import_entity
 
         def fetch() -> list[dict[str, Any]]:
-            result = statistics_during_period(
-                self.hass, (now - timedelta(days=days)).astimezone(dt_util.UTC), now.astimezone(dt_util.UTC),
-                {entity}, "5minute", {"energy": "Wh"}, {"change"},
+            result = _statistics_result(
+                statistics_during_period(
+                    self.hass,
+                    (now - timedelta(days=days)).astimezone(dt_util.UTC),
+                    now.astimezone(dt_util.UTC),
+                    {entity},
+                    "5minute",
+                    {"energy": "Wh"},
+                    {"change"},
+                )
             )
             return result.get(entity, [])
 
         rows = await recorder.async_add_executor_job(fetch)
+        if self._stopping:
+            return
         per_plan: dict[date, list[tuple[datetime, float]]] = {}
+        discarded = 0
         for row in rows:
-            change = row.get("change")
-            if change is None or change < 0 or change / 1000.0 > MAX_SLOT_KWH:
+            try:
+                change = float(row["change"])
+                when = dt_util.as_local(_row_start(row))
+            except (KeyError, TypeError, ValueError, OverflowError, OSError):
+                discarded += 1
                 continue
-            when = dt_util.as_local(_row_start(row))
+            if (
+                not math.isfinite(change)
+                or change < 0
+                or change / 1000.0 > MAX_SLOT_KWH
+                or when > now
+            ):
+                discarded += 1
+                continue
             plan = self.timeline.plan_on(when.date())
             if plan.demand_estimate and plan.demand_rate > 0:
-                per_plan.setdefault(plan.effective_from, []).append((when, change / 1000.0))
+                per_plan.setdefault(plan.effective_from, []).append(
+                    (when, change / 1000.0)
+                )
+        if discarded:
+            _LOGGER.debug("Filtered %d invalid or out-of-range demand rows", discarded)
         changed: set[str] = set()
         for plan in self.timeline.plans:
             slots = per_plan.get(plan.effective_from)
@@ -305,12 +549,19 @@ class TariffRuntime:
     async def _on_demand_tick(self, _now: Any) -> None:
         try:
             await self._async_scan_demand(1, reprice=True)
-        except Exception:  # noqa: BLE001 - a failed scan must never stop the 5-minute timer
-            _LOGGER.exception("Could not refresh the demand estimate")
+        except Exception as err:  # noqa: BLE001 - a failed scan must not stop the timer
+            _LOGGER.warning(
+                "Could not refresh the demand estimate (%s); retrying at the next interval",
+                type(err).__name__,
+            )
 
     def _snapshot(self) -> dict:
         data = self.ledger.to_dict()
         data["demand_signature"] = self._signature()
+        data["history_start"] = self._history_start.isoformat()
+        data["pending_energy"] = {
+            source: dict(slots) for source, slots in self._pending_energy.items()
+        }
         return data
 
     def demand_status(self) -> dict[str, Any] | None:
@@ -339,36 +590,74 @@ class TariffRuntime:
         }
 
     async def async_stop(self) -> None:
+        """Unsubscribe, wait for in-flight demand reads and flush persisted data."""
+        self.async_unsubscribe()
+        async with self._demand_lock:
+            await self._store.async_save(self._snapshot())
+
+    @callback
+    def async_unsubscribe(self) -> None:
+        """Stop event/timer subscriptions without writing an incomplete startup ledger."""
+        self._stopping = True
         for unsub in self._unsubs:
             unsub()
         self._unsubs.clear()
-        await self._store.async_save(self._snapshot())
 
     def _ensure_today(self, today: date) -> None:
         self.ledger.ensure_fixed_through(today, self._daily_charge)
 
     @callback
     def _on_source_change(self, event: Event) -> None:
+        if self._stopping:
+            return
         entity = event.data["entity_id"]
-        value = _numeric(event.data.get("new_state"))
+        state = event.data.get("new_state")
+        value = energy_value(state)
         if value is None or entity not in self._sources:
+            async_dispatcher_send(self.hass, signal_update(self.entry_id))
             return
         key, pricer = self._sources[entity]
         now = dt_util.now()
         self._ensure_today(now.date())
-        self.ledger.record(key, value, now, pricer)
+        old_state = event.data.get("old_state")
+        last_reset = state.attributes.get("last_reset")
+        reset = state.attributes.get("state_class") == "total_increasing" or (
+            last_reset is not None
+            and old_state is not None
+            and old_state.attributes.get("last_reset") != last_reset
+        )
+        plan = self.timeline.plan_on(now.date())
+        if key == "export" and plan.export_daily_cap:
+            delta = self.ledger.reading_delta(key, value, reset_on_decrease=reset)
+            book_export_day(self.ledger, key, now.date(), delta, plan)
+        else:
+            delta = self.ledger.record(key, value, now, pricer, reset_on_decrease=reset)
+        self._remember_increment(key, now, delta)
         self._store.async_delay_save(self._snapshot, SAVE_DELAY_SECONDS)
         async_dispatcher_send(self.hass, signal_update(self.entry_id))
 
     @callback
     def _on_tick(self, _now: Any) -> None:
+        if self._stopping:
+            return
         today = dt_util.now().date()
         self._ensure_today(today)
         self.ledger.prune(today)
+        self._prune_pending(dt_util.now())
+        self._store.async_delay_save(self._snapshot, SAVE_DELAY_SECONDS)
         async_dispatcher_send(self.hass, signal_update(self.entry_id))
 
     def summary(self) -> dict[str, float]:
         return summarize(self.ledger, dt_util.now().date())
+
+    def source_available(self, source: str) -> bool:
+        """Whether the meter behind a cost/usage sensor currently has valid data."""
+        if source in self._sources:
+            return energy_value(self.hass.states.get(source)) is not None
+        return any(
+            key == source and energy_value(self.hass.states.get(entity)) is not None
+            for entity, (key, _pricer) in self._sources.items()
+        )
 
     def band_kwh(self, source: str, scope: str) -> dict[str, float]:
         return band_kwh(self.ledger, source, dt_util.now().date(), scope)
@@ -377,13 +666,24 @@ class TariffRuntime:
         return current_tariff(self.timeline, dt_util.now())
 
     def device_costs(self, entity: str) -> tuple[float, float]:
-        return device_cost(self.ledger, entity, dt_util.now().date())
+        ledger_key = self._sources.get(entity, (entity, self._import_price))[0]
+        return device_cost(self.ledger, ledger_key, dt_util.now().date())
+
+    def device_sensor_key(self, entity: str) -> str:
+        """Return the persistent sensor identity independently of its meter's name."""
+        return self._device_sensor_keys.get(
+            entity, f"device_{entity.split('.', 1)[-1]}"
+        )
 
     def lifetime_import(self) -> float:
-        return round(self.ledger.lifetime_cost("import") + self.ledger.lifetime_cost(FIXED_KEY), 2)
+        return round(
+            self.ledger.lifetime_cost("import") + self.ledger.lifetime_cost(FIXED_KEY),
+            2,
+        )
 
     def lifetime_export(self) -> float:
         return round(self.ledger.lifetime_cost("export"), 2)
 
     def lifetime_device(self, entity: str) -> float:
-        return round(self.ledger.lifetime_cost(entity), 2)
+        ledger_key = self._sources.get(entity, (entity, self._import_price))[0]
+        return round(self.ledger.lifetime_cost(ledger_key), 2)

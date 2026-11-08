@@ -7,17 +7,106 @@ Include the Power Bill and Home Assistant Core versions and a reproducible examp
 
 ## Development setup
 
-Use Python 3.14.2 or newer in the 3.14 series and run these commands from the repository root:
+Install Git and **Python 3.14.2 or newer in the 3.14 series**, including `pip` and `venv`.
+Use Linux, or WSL on Windows, to follow the same setup as the Ubuntu CI runner.
+The test environment matches CI: Home Assistant **2026.11.0** with the official
+`pytest-homeassistant` fixtures, pinned in [requirements_test.txt](requirements_test.txt).
+
+### Get the source
+
+If you do not have write access, fork [power-bill](https://github.com/cloudbr34k84/power-bill)
+on GitHub and clone your fork instead of the upstream URL below. If you already have a
+checkout, open a terminal at its root and create a branch for your change.
+
+```sh
+git clone https://github.com/cloudbr34k84/power-bill.git
+cd power-bill
+git switch -c feature/my-change
+```
+
+### Create an isolated environment
+
+Create and activate a virtual environment:
 
 ```sh
 python3.14 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements_test.txt
+```
+
+Then, from the repository root with the environment active:
+
+```sh
+python -m pip install -r requirements_dev.txt
+python -m pip check
 python -m pytest
 ```
 
-The test requirements install Home Assistant and its custom integration test fixtures.
-Use a development Home Assistant instance when checking changes interactively.
+The development requirements include Ruff plus `requirements_test.txt`, which installs
+Home Assistant and the test fixtures together. Keep their versions
+aligned when updating dependencies. Do not install `pytest-homeassistant-custom-component`
+alongside `pytest-homeassistant`, because they provide overlapping fixtures.
+
+The `.venv/` directory is ignored by Git. Run `deactivate` to leave the environment.
+
+## Running tests
+
+Run commands from the repository root using the activated environment. The full suite is:
+
+```sh
+python -m pytest
+```
+
+For a focused change, run the calculation tests, integration tests or matching test names:
+
+```sh
+python -m pytest tests/test_engine.py
+python -m pytest tests/test_integration.py
+python -m pytest -k demand -vv
+```
+
+To generate the same JUnit report as CI:
+
+```sh
+python -m coverage run --branch --source=custom_components.power_bill.config_flow -m pytest --junitxml=test-results/pytest.xml
+python -m coverage report --show-missing --fail-under=100
+python -m coverage xml -o test-results/coverage.xml
+```
+
+CI requires 100% statement and branch coverage of `config_flow.py`. Flow tests cover
+the user and options paths, duplicate detection, and successful recovery after input
+errors. See the [Bronze rule assessment](docs/BRONZE_QUALITY_SCALE.md) for the complete
+requirements and outstanding upstream publication work.
+
+Run the same code checks as CI before submitting:
+
+```sh
+python -m ruff check custom_components tests tools
+python -m ruff format --check custom_components tests tools
+```
+
+Use `python -m ruff format custom_components tests tools` to apply formatting.
+
+Generated reports are ignored by Git. The test fixtures create a mocked Home Assistant
+environment; the suite does not require your running Home Assistant instance or real bills.
+If fixtures cannot be found, confirm that the environment is active and reinstall
+`requirements_test.txt` with the same `python` interpreter used to run pytest.
+
+## Trying changes in Home Assistant
+
+Use a separate development Home Assistant instance with Recorder enabled:
+
+1. Copy this checkout's `custom_components/power_bill/` directory into
+   `<development-config>/custom_components/power_bill/`. The manifest must be at
+   `<development-config>/custom_components/power_bill/manifest.json`.
+2. Restart the development instance after copying or changing Python files.
+3. Provide cumulative kWh test sensors with `state_class: total` or `total_increasing`.
+4. Add **Power Bill** under Settings → Devices & Services, then configure synthetic tariff
+   values. See the [README](README.md#configuration) for the configuration steps.
+5. Check sensor updates, options changes and a restart with existing entries. Inspect the
+   development instance's logs for setup or runtime errors.
+
+The optional invoice verification utility is separate from this development setup; tests
+and normal integration use do not need invoice files.
 
 ## Repository layout
 
@@ -26,8 +115,12 @@ custom_components/power_bill/  Integration code, manifest, translations and bran
 tests/                        Calculation and Home Assistant integration tests
 tools/                        Optional developer utilities
 .github/                      Validation workflows, issue forms and review templates
+docs/                         Repository publication instructions
 hacs.json                     HACS repository metadata
+pytest.ini                    Test discovery, import path and asyncio settings
 requirements_test.txt         Test environment dependencies
+requirements_dev.txt          Test dependencies plus pinned Ruff
+pyproject.toml                Python lint and formatting settings
 ```
 
 The public name is **Power Bill** and its Home Assistant domain is `power_bill`.
@@ -36,9 +129,19 @@ Keep that domain stable so existing configuration entries and entity identifiers
 ## Making changes
 
 Keep each pull request focused on one problem and describe the resulting behavior.
+Use timezone-aware Home Assistant time helpers, async I/O, typed `entry.runtime_data`,
+frozen entity descriptions and JSON-safe attributes. Keep runtime modules free of imports
+from the developer `tools/` directory. See [the integration review](docs/INTEGRATION_REVIEW.md)
+for the standards checked and documented limitations.
 Run `python -m pytest` before submitting. Include regression coverage for changes to cost calculations
 or Home Assistant behavior, and update the user documentation when configuration or behavior changes.
 GitHub Actions also runs the HACS and Hassfest validators.
+
+The **Tests** workflow runs the full test suite when a pull request is opened, updated,
+reopened or marked ready for review, and on pushes, manual runs and the weekly schedule.
+It uses Python 3.14 and the pinned Home Assistant test environment in `requirements_test.txt`.
+Download the `pytest-results` artifact from a workflow run for its JUnit XML report;
+reports are retained for 14 days, including when tests fail.
 
 Use synthetic or anonymized examples in code, tests, logs and issues. Keep raw electricity bills,
 extracted invoice text, account details, credentials and Home Assistant configuration files outside
@@ -52,6 +155,9 @@ invoice text from outside the repository if you use it; no raw bills belong in t
 
 1. Update `custom_components/power_bill/manifest.json` with the release version and record the changes
    in `CHANGELOG.md`.
+   Use a numeric `MAJOR.MINOR.PATCH` version, without a `v` prefix, and increment it for each
+   release. Keep the minimum Home Assistant version in `hacs.json` aligned with the APIs used;
+   the current minimum is `2025.8.0` for `OptionsFlowWithReload`.
 2. Confirm the README, HACS metadata, repository links and installation instructions match the release.
 3. Run `python -m pytest` and confirm the GitHub HACS, Hassfest and test checks pass.
 4. Check installation and configuration in a development Home Assistant instance, including upgrades

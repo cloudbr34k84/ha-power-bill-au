@@ -3,14 +3,16 @@
     "step": {
       "user": {
         "title": "Energy provider",
-        "description": "Name your energy provider (as on your bill), then pick the total kWh sensors to price. The name is used for the device and its sensors.",
+        "description": "Name your energy provider, then choose cumulative energy sensors in Wh, kWh or MWh with state class total or total_increasing. The name is used for the device and its sensors.",
         "data": {
           "provider": "Energy provider name",
-          "import_entity": "Import energy sensor (kWh, total)",
-          "export_entity": "Export energy sensor (kWh, total, optional)"
+          "import_entity": "Import energy sensor (Wh, kWh or MWh)",
+          "export_entity": "Export energy sensor (optional)"
         },
         "data_description": {
-          "provider": "For example 1st Energy. Sensors are named after it, such as 1st Energy Current tariff."
+          "provider": "The retailer or label for this contract. Used for the device and sensor names; entity IDs stay the same when it changes.",
+          "import_entity": "Cumulative grid-import energy in Wh, kWh or MWh, with state class total or total_increasing.",
+          "export_entity": "Optional cumulative grid-export energy in Wh, kWh or MWh. Select a different sensor from the import meter."
         }
       },
       "import_bands": {
@@ -29,6 +31,20 @@
           "import_band_3_start": "Import band 3 start hour (0-23)",
           "import_band_3_end": "Import band 3 end hour (1-24, exclusive)",
           "import_band_3_rate": "Import band 3 rate (AUD per kWh)"
+        },
+        "data_description": {
+          "import_band_1_name": "A short tariff label, for example peak or off_peak. Leave blank to leave this slot unused. Names must be distinct.",
+          "import_band_1_start": "Start hour on the 24-hour clock, inclusive (0–23). A start after the end wraps through midnight.",
+          "import_band_1_end": "End hour on the 24-hour clock, exclusive (1–24). Use 24 for midnight; all named bands must cover each hour exactly once.",
+          "import_band_1_rate": "The tariff for one kWh in Australian dollars, for example 0.25 for 25 cents. Enter a nonnegative amount.",
+          "import_band_2_name": "A short tariff label, for example peak or off_peak. Leave blank to leave this slot unused. Names must be distinct.",
+          "import_band_2_start": "Start hour on the 24-hour clock, inclusive (0–23). A start after the end wraps through midnight.",
+          "import_band_2_end": "End hour on the 24-hour clock, exclusive (1–24). Use 24 for midnight; all named bands must cover each hour exactly once.",
+          "import_band_2_rate": "The tariff for one kWh in Australian dollars, for example 0.25 for 25 cents. Enter a nonnegative amount.",
+          "import_band_3_name": "A short tariff label, for example peak or off_peak. Leave blank to leave this slot unused. Names must be distinct.",
+          "import_band_3_start": "Start hour on the 24-hour clock, inclusive (0–23). A start after the end wraps through midnight.",
+          "import_band_3_end": "End hour on the 24-hour clock, exclusive (1–24). Use 24 for midnight; all named bands must cover each hour exactly once.",
+          "import_band_3_rate": "The tariff for one kWh in Australian dollars, for example 0.25 for 25 cents. Enter a nonnegative amount."
         }
       },
       "export_bands": {
@@ -47,6 +63,20 @@
           "export_band_3_start": "Export band 3 start hour (0-23)",
           "export_band_3_end": "Export band 3 end hour (1-24, exclusive)",
           "export_band_3_rate": "Export band 3 rate (AUD per kWh)"
+        },
+        "data_description": {
+          "export_band_1_name": "A short tariff label, for example peak or off_peak. Leave blank to leave this slot unused. Names must be distinct.",
+          "export_band_1_start": "Start hour on the 24-hour clock, inclusive (0–23). A start after the end wraps through midnight.",
+          "export_band_1_end": "End hour on the 24-hour clock, exclusive (1–24). Use 24 for midnight; all named bands must cover each hour exactly once.",
+          "export_band_1_rate": "The tariff for one kWh in Australian dollars, for example 0.25 for 25 cents. Enter a nonnegative amount.",
+          "export_band_2_name": "A short tariff label, for example peak or off_peak. Leave blank to leave this slot unused. Names must be distinct.",
+          "export_band_2_start": "Start hour on the 24-hour clock, inclusive (0–23). A start after the end wraps through midnight.",
+          "export_band_2_end": "End hour on the 24-hour clock, exclusive (1–24). Use 24 for midnight; all named bands must cover each hour exactly once.",
+          "export_band_2_rate": "The tariff for one kWh in Australian dollars, for example 0.25 for 25 cents. Enter a nonnegative amount.",
+          "export_band_3_name": "A short tariff label, for example peak or off_peak. Leave blank to leave this slot unused. Names must be distinct.",
+          "export_band_3_start": "Start hour on the 24-hour clock, inclusive (0–23). A start after the end wraps through midnight.",
+          "export_band_3_end": "End hour on the 24-hour clock, exclusive (1–24). Use 24 for midnight; all named bands must cover each hour exactly once.",
+          "export_band_3_rate": "The tariff for one kWh in Australian dollars, for example 0.25 for 25 cents. Enter a nonnegative amount."
         }
       },
       "charges": {
@@ -57,17 +87,26 @@
           "daily_supply": "Daily supply charge (AUD/day)",
           "daily_membership": "Daily membership fee (AUD/day)",
           "tracked_devices": "Track cost of these energy sensors (optional)"
+        },
+        "data_description": {
+          "rates_include_gst": "Turn on when your import rates and fixed charges already include 10% GST. Export credits are not increased for GST.",
+          "daily_supply": "Fixed supply charge in Australian dollars for each local calendar day. Enter zero when there is no supply charge.",
+          "daily_membership": "Additional fixed membership fee in Australian dollars per local calendar day. Enter zero when there is no fee.",
+          "tracked_devices": "Optional additional cumulative energy sensors to price at this contract’s import rates. Do not select the primary import or export meter."
         }
       }
     },
     "error": {
       "no_bands": "Enter at least one band with a name.",
-      "duplicate_names": "Band names must be unique.",
+      "duplicate_names": "Use distinct band names containing A-Z letters or digits.",
       "invalid_window": "Each band needs a start and end hour that differ (start 0-23, end 1-24).",
-      "negative_rate": "Rates cannot be negative.",
+      "negative_rate": "Rates must be finite numbers greater than or equal to zero.",
       "overlap": "Two bands cover the same hour.",
       "gap": "Some hours of the day are not covered by any band.",
-      "invalid_provider": "Enter the name of your energy provider."
+      "invalid_provider": "Enter the name of your energy provider.",
+      "invalid_amount": "Amounts must be finite numbers greater than or equal to zero.",
+      "invalid_energy_sensor": "Choose a cumulative energy sensor in Wh, kWh or MWh with state class total or total_increasing. Use a different meter for each role.",
+      "invalid_date": "Enter a valid date as YYYY-MM-DD."
     },
     "abort": {
       "already_configured": "This contract is already set up with these meters."
@@ -91,6 +130,20 @@
           "import_band_3_start": "Import band 3 start hour (0-23)",
           "import_band_3_end": "Import band 3 end hour (1-24, exclusive)",
           "import_band_3_rate": "Import band 3 rate (AUD per kWh)"
+        },
+        "data_description": {
+          "import_band_1_name": "A short tariff label, for example peak or off_peak. Leave blank to leave this slot unused. Names must be distinct.",
+          "import_band_1_start": "Start hour on the 24-hour clock, inclusive (0–23). A start after the end wraps through midnight.",
+          "import_band_1_end": "End hour on the 24-hour clock, exclusive (1–24). Use 24 for midnight; all named bands must cover each hour exactly once.",
+          "import_band_1_rate": "The tariff for one kWh in Australian dollars, for example 0.25 for 25 cents. Enter a nonnegative amount.",
+          "import_band_2_name": "A short tariff label, for example peak or off_peak. Leave blank to leave this slot unused. Names must be distinct.",
+          "import_band_2_start": "Start hour on the 24-hour clock, inclusive (0–23). A start after the end wraps through midnight.",
+          "import_band_2_end": "End hour on the 24-hour clock, exclusive (1–24). Use 24 for midnight; all named bands must cover each hour exactly once.",
+          "import_band_2_rate": "The tariff for one kWh in Australian dollars, for example 0.25 for 25 cents. Enter a nonnegative amount.",
+          "import_band_3_name": "A short tariff label, for example peak or off_peak. Leave blank to leave this slot unused. Names must be distinct.",
+          "import_band_3_start": "Start hour on the 24-hour clock, inclusive (0–23). A start after the end wraps through midnight.",
+          "import_band_3_end": "End hour on the 24-hour clock, exclusive (1–24). Use 24 for midnight; all named bands must cover each hour exactly once.",
+          "import_band_3_rate": "The tariff for one kWh in Australian dollars, for example 0.25 for 25 cents. Enter a nonnegative amount."
         }
       },
       "export_bands": {
@@ -109,6 +162,20 @@
           "export_band_3_start": "Export band 3 start hour (0-23)",
           "export_band_3_end": "Export band 3 end hour (1-24, exclusive)",
           "export_band_3_rate": "Export band 3 rate (AUD per kWh)"
+        },
+        "data_description": {
+          "export_band_1_name": "A short tariff label, for example peak or off_peak. Leave blank to leave this slot unused. Names must be distinct.",
+          "export_band_1_start": "Start hour on the 24-hour clock, inclusive (0–23). A start after the end wraps through midnight.",
+          "export_band_1_end": "End hour on the 24-hour clock, exclusive (1–24). Use 24 for midnight; all named bands must cover each hour exactly once.",
+          "export_band_1_rate": "The tariff for one kWh in Australian dollars, for example 0.25 for 25 cents. Enter a nonnegative amount.",
+          "export_band_2_name": "A short tariff label, for example peak or off_peak. Leave blank to leave this slot unused. Names must be distinct.",
+          "export_band_2_start": "Start hour on the 24-hour clock, inclusive (0–23). A start after the end wraps through midnight.",
+          "export_band_2_end": "End hour on the 24-hour clock, exclusive (1–24). Use 24 for midnight; all named bands must cover each hour exactly once.",
+          "export_band_2_rate": "The tariff for one kWh in Australian dollars, for example 0.25 for 25 cents. Enter a nonnegative amount.",
+          "export_band_3_name": "A short tariff label, for example peak or off_peak. Leave blank to leave this slot unused. Names must be distinct.",
+          "export_band_3_start": "Start hour on the 24-hour clock, inclusive (0–23). A start after the end wraps through midnight.",
+          "export_band_3_end": "End hour on the 24-hour clock, exclusive (1–24). Use 24 for midnight; all named bands must cover each hour exactly once.",
+          "export_band_3_rate": "The tariff for one kWh in Australian dollars, for example 0.25 for 25 cents. Enter a nonnegative amount."
         }
       },
       "charges": {
@@ -119,6 +186,12 @@
           "daily_supply": "Daily supply charge (AUD/day)",
           "daily_membership": "Daily membership fee (AUD/day)",
           "tracked_devices": "Track cost of these energy sensors (optional)"
+        },
+        "data_description": {
+          "rates_include_gst": "Turn on when your import rates and fixed charges already include 10% GST. Export credits are not increased for GST.",
+          "daily_supply": "Fixed supply charge in Australian dollars for each local calendar day. Enter zero when there is no supply charge.",
+          "daily_membership": "Additional fixed membership fee in Australian dollars per local calendar day. Enter zero when there is no fee.",
+          "tracked_devices": "Optional additional cumulative energy sensors to price at this contract’s import rates. Do not select the primary import or export meter."
         }
       },
       "add_plan": {
@@ -126,6 +199,9 @@
         "description": "Use this for a rate or plan change. Usage from this date is priced with the new plan. Earlier usage keeps the plan it was recorded under.",
         "data": {
           "effective_from": "Plan starts on"
+        },
+        "data_description": {
+          "effective_from": "The local calendar date on which these replacement rates start. Each plan must have a different start date."
         }
       },
       "init": {
@@ -143,6 +219,9 @@
         "description": "Choose the plan this demand charge belongs to.",
         "data": {
           "plan": "Plan"
+        },
+        "data_description": {
+          "plan": "Choose the existing dated tariff plan to update. Earlier and later plans keep their own settings."
         }
       },
       "devices": {
@@ -150,6 +229,9 @@
         "description": "Pick other energy sensors (kWh) to price with this contract, for example an EV charger. Each one gets cost today, month to date and lifetime sensors. Deselecting a device removes its sensors.",
         "data": {
           "tracked_devices": "Energy sensors to track"
+        },
+        "data_description": {
+          "tracked_devices": "Optional additional cumulative energy sensors to price at this contract’s import rates. Do not select the primary import or export meter."
         }
       },
       "demand_values": {
@@ -177,6 +259,9 @@
         "description": "Choose the plan this feed-in rule belongs to.",
         "data": {
           "plan": "Plan"
+        },
+        "data_description": {
+          "plan": "Choose the existing dated tariff plan to update. Earlier and later plans keep their own settings."
         }
       },
       "feed_in_values": {
@@ -198,24 +283,31 @@
         "description": "The name on your bill, for example 1st Energy. Changing it renames the device and its sensors. Entity IDs don't change.",
         "data": {
           "provider": "Energy provider name"
+        },
+        "data_description": {
+          "provider": "The retailer or label for this contract. Used for the device and sensor names; entity IDs stay the same when it changes."
         }
       }
     },
     "error": {
       "no_bands": "Enter at least one band with a name.",
-      "duplicate_names": "Band names must be unique.",
+      "duplicate_names": "Use distinct band names containing A-Z letters or digits.",
       "invalid_window": "Each band needs a start and end hour that differ (start 0-23, end 1-24).",
-      "negative_rate": "Rates cannot be negative.",
+      "negative_rate": "Rates must be finite numbers greater than or equal to zero.",
       "overlap": "Two bands cover the same hour.",
       "gap": "Some hours of the day are not covered by any band.",
       "duplicate_date": "A plan already starts on this date.",
       "invalid_demand": "Use one month per line as YYYY-MM: kW, for example 2025-01: 13.2",
       "needs_single_band": "Stepped feed-in needs a plan with a single feed-in band.",
-      "invalid_demand_window": "The window must end after it starts, for example 16 to 21.",
-      "invalid_provider": "Enter the name of your energy provider."
+      "invalid_demand_window": "Use whole hours with the end after the start, and an averaging block of 5, 15, 30 or 60 minutes.",
+      "invalid_provider": "Enter the name of your energy provider.",
+      "invalid_amount": "Amounts must be finite numbers greater than or equal to zero.",
+      "invalid_energy_sensor": "Choose a cumulative energy sensor in Wh, kWh or MWh with state class total or total_increasing. Use a different meter for each role.",
+      "invalid_date": "Enter a valid date as YYYY-MM-DD."
     },
     "abort": {
-      "no_export_meter": "This plan has no feed-in band. Set up an export meter first."
+      "no_export_meter": "This plan has no feed-in band. Set up an export meter first.",
+      "needs_single_band": "Stepped feed-in needs a plan with one export band covering the full day. Add a plan with a single export band, then configure stepped feed-in for it."
     }
   }
 }

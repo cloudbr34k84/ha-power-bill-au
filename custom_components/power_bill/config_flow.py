@@ -6,15 +6,16 @@ https://github.com/tonylofgren/aurora-smart-home
 
 from __future__ import annotations
 
+import copy
+import hashlib
+import json
+import math
+import re
+from datetime import date
 from typing import Any
 
-import copy
-import re
-
 import voluptuous as vol
-
 from homeassistant.config_entries import (
-    ConfigEntry,
     ConfigFlow,
     ConfigFlowResult,
     OptionsFlow,
@@ -23,6 +24,7 @@ from homeassistant.config_entries import (
 from homeassistant.core import callback
 from homeassistant.helpers import selector
 
+from . import TariffConfigEntry
 from .const import (
     CONF_DAILY_MEMBERSHIP,
     CONF_DAILY_SUPPLY,
@@ -30,19 +32,24 @@ from .const import (
     CONF_EXPORT_ENTITY,
     CONF_IMPORT_BANDS,
     CONF_IMPORT_ENTITY,
+    CONF_PLANS,
     CONF_PROVIDER,
     CONF_RATES_INCLUDE_GST,
-    CONF_PLANS,
+    CONF_SOURCES,
     CONF_TRACKED_DEVICES,
     DOMAIN,
+    provider_name,
 )
-from .const import provider_name
 from .engine import Band, validate_bands
+from .sources import meter_pair, prepare_sources
+from .validation import valid_energy_sensor
 
 BAND_COUNT = 3
 
 
-def _number(lo: float, hi: float, step: float | str, unit: str | None = None) -> selector.NumberSelector:
+def _number(
+    lo: float, hi: float, step: float | str, unit: str | None = None
+) -> selector.NumberSelector:
     config: dict[str, Any] = {
         "min": lo,
         "max": hi,
@@ -74,11 +81,17 @@ def _band_schema(prefix: str, bands: list[dict[str, Any]]) -> vol.Schema:
     for i in range(BAND_COUNT):
         band = bands[i] if i < len(bands) else {}
         n = i + 1
-        fields[vol.Optional(f"{prefix}{n}_name", default=band.get("name", ""))] = selector.TextSelector()
-        fields[vol.Optional(f"{prefix}{n}_start", default=band.get("start", 0))] = _number(0, 23, 1)
-        fields[vol.Optional(f"{prefix}{n}_end", default=band.get("end", 24))] = _number(1, 24, 1)
-        fields[vol.Optional(f"{prefix}{n}_rate", default=band.get("rate", 0.0))] = _number(
-            0, 5, "any", "AUD/kWh"
+        fields[vol.Optional(f"{prefix}{n}_name", default=band.get("name", ""))] = (
+            selector.TextSelector()
+        )
+        fields[vol.Optional(f"{prefix}{n}_start", default=band.get("start", 0))] = (
+            _number(0, 23, 1)
+        )
+        fields[vol.Optional(f"{prefix}{n}_end", default=band.get("end", 24))] = _number(
+            1, 24, 1
+        )
+        fields[vol.Optional(f"{prefix}{n}_rate", default=band.get("rate", 0.0))] = (
+            _number(0, 5, "any", "AUD/kWh")
         )
     return vol.Schema(fields)
 
@@ -89,18 +102,24 @@ def _parse_bands(data: dict[str, Any], prefix: str) -> list[dict[str, Any]]:
         name = str(data.get(f"{prefix}{n}_name") or "").strip()
         if not name:
             continue  # blank name = unused band slot
+        start = float(data.get(f"{prefix}{n}_start", 0))
+        end = float(data.get(f"{prefix}{n}_end", 24))
+        if not start.is_integer() or not end.is_integer():
+            raise ValueError("invalid_window")
         bands.append(
             {
                 "name": name,
-                "start": int(data.get(f"{prefix}{n}_start", 0)),
-                "end": int(data.get(f"{prefix}{n}_end", 24)),
+                "start": int(start),
+                "end": int(end),
                 "rate": float(data.get(f"{prefix}{n}_rate", 0.0)),
             }
         )
     return bands
 
 
-_DEMAND_LINE = re.compile(r"^\s*(\d{4}-\d{2})\s*[=:]\s*(\d+(?:\.\d+)?)\s*(?:kw)?\s*$", re.IGNORECASE)
+_DEMAND_LINE = re.compile(
+    r"^\s*(\d{4}-\d{2})\s*[=:]\s*(\d+(?:\.\d+)?)\s*(?:kw)?\s*$", re.IGNORECASE
+)
 
 
 def _parse_demand(text: str) -> dict[str, float]:
@@ -112,8 +131,23 @@ def _parse_demand(text: str) -> dict[str, float]:
         match = _DEMAND_LINE.match(part)
         if not match:
             raise ValueError(part)
-        table[match.group(1)] = float(match.group(2))
+        month = match.group(1)
+        date.fromisoformat(f"{month}-01")
+        value = float(match.group(2))
+        if not math.isfinite(value) or month in table:
+            raise ValueError("invalid_demand")
+        table[month] = value
     return table
+
+
+def _valid_amounts(*values: Any) -> bool:
+    """Reject NaN, infinity and negative amounts even when selectors accept them."""
+    try:
+        return all(
+            math.isfinite(float(value)) and float(value) >= 0 for value in values
+        )
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
 def _band_error(bands: list[dict[str, Any]]) -> str | None:
@@ -128,7 +162,8 @@ def _charges_schema(current: dict[str, Any]) -> vol.Schema:
     return vol.Schema(
         {
             vol.Required(
-                CONF_RATES_INCLUDE_GST, default=current.get(CONF_RATES_INCLUDE_GST, True)
+                CONF_RATES_INCLUDE_GST,
+                default=current.get(CONF_RATES_INCLUDE_GST, True),
             ): selector.BooleanSelector(),
             vol.Required(
                 CONF_DAILY_SUPPLY, default=current.get(CONF_DAILY_SUPPLY, 0.0)
@@ -139,7 +174,9 @@ def _charges_schema(current: dict[str, Any]) -> vol.Schema:
             vol.Optional(
                 CONF_TRACKED_DEVICES, default=current.get(CONF_TRACKED_DEVICES, [])
             ): selector.EntitySelector(
-                selector.EntitySelectorConfig(domain="sensor", device_class="energy", multiple=True)
+                selector.EntitySelectorConfig(
+                    domain="sensor", device_class="energy", multiple=True
+                )
             ),
         }
     )
@@ -150,11 +187,17 @@ class _TariffStepsMixin:
 
     _data: dict[str, Any]
 
-    async def async_step_import_bands(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+    async def async_step_import_bands(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
-            bands = _parse_bands(user_input, "import_band_")
-            if error := _band_error(bands):
+            try:
+                bands = _parse_bands(user_input, "import_band_")
+                error = _band_error(bands)
+            except (ValueError, TypeError, OverflowError):
+                error = "invalid_window"
+            if error:
                 errors["base"] = error
             else:
                 self._data[CONF_IMPORT_BANDS] = bands
@@ -163,40 +206,81 @@ class _TariffStepsMixin:
                 return await self.async_step_charges()
         return self.async_show_form(
             step_id="import_bands",
-            data_schema=_band_schema("import_band_", self._data.get(CONF_IMPORT_BANDS, [])),
+            data_schema=_band_schema(
+                "import_band_", self._data.get(CONF_IMPORT_BANDS, [])
+            ),
             errors=errors,
         )
 
-    async def async_step_export_bands(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+    async def async_step_export_bands(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
-            bands = _parse_bands(user_input, "export_band_")
-            if error := _band_error(bands):
+            try:
+                bands = _parse_bands(user_input, "export_band_")
+                error = _band_error(bands)
+            except (ValueError, TypeError, OverflowError):
+                error = "invalid_window"
+            if error:
                 errors["base"] = error
             else:
                 self._data[CONF_EXPORT_BANDS] = bands
                 return await self.async_step_charges()
         return self.async_show_form(
             step_id="export_bands",
-            data_schema=_band_schema("export_band_", self._data.get(CONF_EXPORT_BANDS, [])),
+            data_schema=_band_schema(
+                "export_band_", self._data.get(CONF_EXPORT_BANDS, [])
+            ),
             errors=errors,
         )
 
-    async def async_step_charges(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+    async def async_step_charges(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
         if user_input is not None:
-            self._data.update(
-                {
-                    CONF_RATES_INCLUDE_GST: bool(user_input[CONF_RATES_INCLUDE_GST]),
-                    CONF_DAILY_SUPPLY: float(user_input[CONF_DAILY_SUPPLY]),
-                    CONF_DAILY_MEMBERSHIP: float(user_input[CONF_DAILY_MEMBERSHIP]),
-                    CONF_TRACKED_DEVICES: list(user_input.get(CONF_TRACKED_DEVICES) or []),
-                }
-            )
-            return await self._async_finish()
+            if not _valid_amounts(
+                user_input[CONF_DAILY_SUPPLY], user_input[CONF_DAILY_MEMBERSHIP]
+            ):
+                errors["base"] = "invalid_amount"
+            if error := self._tracked_devices_error(
+                user_input.get(CONF_TRACKED_DEVICES) or []
+            ):
+                errors[CONF_TRACKED_DEVICES] = error
+            if not errors:
+                self._data.update(
+                    {
+                        CONF_RATES_INCLUDE_GST: bool(
+                            user_input[CONF_RATES_INCLUDE_GST]
+                        ),
+                        CONF_DAILY_SUPPLY: float(user_input[CONF_DAILY_SUPPLY]),
+                        CONF_DAILY_MEMBERSHIP: float(user_input[CONF_DAILY_MEMBERSHIP]),
+                        CONF_TRACKED_DEVICES: list(
+                            user_input.get(CONF_TRACKED_DEVICES) or []
+                        ),
+                    }
+                )
+                return await self._async_finish()
         return self.async_show_form(
             step_id="charges",
             data_schema=_charges_schema(self._data),
+            errors=errors,
         )
+
+    def _tracked_devices_error(self, devices: list[str]) -> str | None:
+        """Prevent invalid meters and duplicate pricing of primary import/export meters."""
+        data, _ = prepare_sources(self.hass, self._data, {})
+        primary = {
+            data.get(CONF_IMPORT_ENTITY),
+            data.get(CONF_EXPORT_ENTITY),
+        }
+        if len(set(devices)) != len(devices) or any(
+            entity in primary or not valid_energy_sensor(self.hass.states.get(entity))
+            for entity in devices
+        ):
+            return "invalid_energy_sensor"
+        return None
 
     async def _async_finish(self) -> ConfigFlowResult:
         raise NotImplementedError
@@ -206,41 +290,93 @@ class EnergyTariffCostConfigFlow(_TariffStepsMixin, ConfigFlow, domain=DOMAIN):
     """Creates one electricity contract."""
 
     VERSION = 1
+    MINOR_VERSION = 3
 
     def __init__(self) -> None:
         self._data: dict[str, Any] = {}
 
-    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         if user_input is not None:
-            # one contract per pair of meters: adding the same meters twice is refused
-            await self.async_set_unique_id(
-                f"{user_input[CONF_IMPORT_ENTITY]}|{user_input.get(CONF_EXPORT_ENTITY) or ''}"
-            )
-            self._abort_if_unique_id_configured()
-            if not user_input[CONF_PROVIDER].strip():
+            errors = {}
+            if not str(user_input[CONF_PROVIDER]).strip():
+                errors[CONF_PROVIDER] = "invalid_provider"
+            for key in (CONF_IMPORT_ENTITY, CONF_EXPORT_ENTITY):
+                if entity := user_input.get(key):
+                    if not valid_energy_sensor(self.hass.states.get(entity)):
+                        errors[key] = "invalid_energy_sensor"
+            if user_input.get(CONF_EXPORT_ENTITY) == user_input[CONF_IMPORT_ENTITY]:
+                errors[CONF_EXPORT_ENTITY] = "invalid_energy_sensor"
+            if errors:
                 return self.async_show_form(
-                    step_id="user", data_schema=USER_SCHEMA, errors={CONF_PROVIDER: "invalid_provider"})
+                    step_id="user", data_schema=USER_SCHEMA, errors=errors
+                )
+            if self._meters_configured(user_input):
+                return self.async_abort(reason="already_configured")
+            # One contract per pair of meters. Keep the established ID format.
+            await self.async_set_unique_id(self._contract_unique_id(user_input))
+            self._abort_if_unique_id_configured()
             self._data.update(user_input)
+            self._data, _ = prepare_sources(self.hass, self._data, {})
             return await self.async_step_import_bands()
         return self.async_show_form(step_id="user", data_schema=USER_SCHEMA)
 
+    def _meters_configured(self, data: dict[str, Any]) -> bool:
+        """Compare source identities even when their entity IDs have changed."""
+        pair = meter_pair(self.hass, data, {})
+        return any(
+            meter_pair(self.hass, entry.data, entry.options) == pair
+            for entry in self._async_current_entries()
+        )
+
+    def _contract_unique_id(self, data: dict[str, Any]) -> str:
+        """Keep legacy IDs while allowing a different meter to reuse an alias."""
+        candidate = f"{data[CONF_IMPORT_ENTITY]}|{data.get(CONF_EXPORT_ENTITY) or ''}"
+        if any(entry.unique_id == candidate for entry in self._async_current_entries()):
+            identity = json.dumps(meter_pair(self.hass, data, {})).encode()
+            candidate = f"{candidate}|{hashlib.sha256(identity).hexdigest()[:12]}"
+        return candidate
+
     async def _async_finish(self) -> ConfigFlowResult:
+        if self._meters_configured(self._data):
+            return self.async_abort(reason="already_configured")
+        await self.async_set_unique_id(self._contract_unique_id(self._data))
+        self._abort_if_unique_id_configured()
         self._data[CONF_PROVIDER] = self._data[CONF_PROVIDER].strip()
-        return self.async_create_entry(title=self._data[CONF_PROVIDER], data=self._data)
+        meter_keys = {CONF_IMPORT_ENTITY, CONF_EXPORT_ENTITY, CONF_SOURCES}
+        data, options = prepare_sources(
+            self.hass,
+            {key: value for key, value in self._data.items() if key in meter_keys},
+            {key: value for key, value in self._data.items() if key not in meter_keys},
+            devices=list(self._data.get(CONF_TRACKED_DEVICES) or []),
+        )
+        return self.async_create_entry(
+            title=self._data[CONF_PROVIDER],
+            data=data,
+            options=options,
+        )
 
     @staticmethod
     @callback
-    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
+    def async_get_options_flow(config_entry: TariffConfigEntry) -> OptionsFlow:
         return EnergyTariffCostOptionsFlow()
 
 
 class EnergyTariffCostOptionsFlow(_TariffStepsMixin, OptionsFlowWithReload):
     """Adds a dated plan (a rate or plan change from a given date) to an existing contract."""
 
-    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        return self.async_show_menu(step_id="init", menu_options=["provider", "add_plan", "demand", "feed_in", "devices"])
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=["provider", "add_plan", "demand", "feed_in", "devices"],
+        )
 
-    async def async_step_provider(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+    async def async_step_provider(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         """Rename the contract. The provider name names the device and its sensors."""
         entry = self.config_entry
         errors: dict[str, str] = {}
@@ -249,59 +385,102 @@ class EnergyTariffCostOptionsFlow(_TariffStepsMixin, OptionsFlowWithReload):
             if not name:
                 errors[CONF_PROVIDER] = "invalid_provider"
             else:
-                self.hass.config_entries.async_update_entry(
-                    entry, title=name, data={**entry.data, CONF_PROVIDER: name})
-                self.hass.config_entries.async_schedule_reload(entry.entry_id)  # re-create the sensors' names
-                return self.async_create_entry(title="", data=self._options_data())
-        current = provider_name(entry.data)
+                self.hass.config_entries.async_update_entry(entry, title=name)
+                return self.async_create_entry(
+                    title="", data={**self._options_data(), CONF_PROVIDER: name}
+                )
+        current = provider_name({**entry.data, **entry.options})
         return self.async_show_form(
             step_id="provider",
-            data_schema=vol.Schema({vol.Required(CONF_PROVIDER, default=current): selector.TextSelector()}),
+            data_schema=vol.Schema(
+                {vol.Required(CONF_PROVIDER, default=current): selector.TextSelector()}
+            ),
             errors=errors,
         )
 
-    def _options_data(self, *, plans: list[dict[str, Any]] | None = None,
-                      devices: list[str] | None = None) -> dict[str, Any]:
+    def _options_data(
+        self,
+        *,
+        plans: list[dict[str, Any]] | None = None,
+        devices: list[str] | None = None,
+    ) -> dict[str, Any]:
         """New options: everything already stored, with `plans` and/or `devices` replaced."""
         data = copy.deepcopy(dict(self.config_entry.options))
         if plans is not None:
             data[CONF_PLANS] = plans
         if devices is not None:
-            data[CONF_TRACKED_DEVICES] = devices
+            entry_data, data = prepare_sources(
+                self.hass, self.config_entry.data, data, devices=devices
+            )
+            self.hass.config_entries.async_update_entry(
+                self.config_entry, data=entry_data
+            )
         return data
 
-    async def async_step_devices(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+    async def async_step_devices(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         """Choose which other energy sensors get their own cost sensors (an EV charger, a pool pump...)."""
-        merged = {**self.config_entry.data, **self.config_entry.options}
+        data, options = prepare_sources(
+            self.hass, self.config_entry.data, self.config_entry.options
+        )
+        merged = {**data, **options}
+        self._data = merged
+        errors = {}
         if user_input is not None:
             devices = list(user_input.get(CONF_TRACKED_DEVICES) or [])
-            return self.async_create_entry(title="", data=self._options_data(devices=devices))
+            if error := self._tracked_devices_error(devices):
+                errors[CONF_TRACKED_DEVICES] = error
+            else:
+                return self.async_create_entry(
+                    title="", data=self._options_data(devices=devices)
+                )
         return self.async_show_form(
             step_id="devices",
-            data_schema=vol.Schema({
-                vol.Optional(CONF_TRACKED_DEVICES, default=list(merged.get(CONF_TRACKED_DEVICES) or [])):
-                    selector.EntitySelector(selector.EntitySelectorConfig(
-                        domain="sensor", device_class="energy", multiple=True)),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_TRACKED_DEVICES,
+                        default=list(merged.get(CONF_TRACKED_DEVICES) or []),
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(
+                            domain="sensor", device_class="energy", multiple=True
+                        )
+                    ),
+                }
+            ),
+            errors=errors,
         )
 
     async def _load_plans(self) -> None:
-        merged = {**self.config_entry.data, **self.config_entry.options}
+        data, options = prepare_sources(
+            self.hass, self.config_entry.data, self.config_entry.options
+        )
+        merged = {**data, **options}
         # deep copy: editing a plan in the flow must not change the live entry's options,
         # otherwise HA sees "no change" when the flow is submitted and skips the save and reload
-        self._plans: list[dict[str, Any]] = copy.deepcopy(list(merged.get(CONF_PLANS) or []))
+        self._plans: list[dict[str, Any]] = copy.deepcopy(
+            list(merged.get(CONF_PLANS) or [])
+        )
         if not self._plans:  # the single original plan starts at the beginning of time
-            self._plans = [{
-                "effective_from": "2000-01-01",
-                CONF_IMPORT_BANDS: merged[CONF_IMPORT_BANDS],
-                CONF_EXPORT_BANDS: merged.get(CONF_EXPORT_BANDS) if merged.get(CONF_EXPORT_ENTITY) else None,
-                CONF_DAILY_SUPPLY: merged[CONF_DAILY_SUPPLY],
-                CONF_DAILY_MEMBERSHIP: merged[CONF_DAILY_MEMBERSHIP],
-                CONF_RATES_INCLUDE_GST: merged[CONF_RATES_INCLUDE_GST],
-            }]
+            self._plans = [
+                {
+                    "effective_from": "2000-01-01",
+                    CONF_IMPORT_BANDS: merged[CONF_IMPORT_BANDS],
+                    CONF_EXPORT_BANDS: merged.get(CONF_EXPORT_BANDS)
+                    if merged.get(CONF_EXPORT_ENTITY)
+                    else None,
+                    CONF_DAILY_SUPPLY: merged[CONF_DAILY_SUPPLY],
+                    CONF_DAILY_MEMBERSHIP: merged[CONF_DAILY_MEMBERSHIP],
+                    CONF_RATES_INCLUDE_GST: merged[CONF_RATES_INCLUDE_GST],
+                }
+            ]
         latest = max(self._plans, key=lambda p: p["effective_from"])
         # prefill the new plan from the latest one, so only changes need typing
-        self._data = {**merged, **{k: v for k, v in latest.items() if k != "effective_from"}}
+        self._data = {
+            **merged,
+            **{k: v for k, v in latest.items() if k != "effective_from"},
+        }
         self._data[CONF_EXPORT_BANDS] = latest.get(CONF_EXPORT_BANDS) or []
 
     # ---- demand charge and stepped feed-in: both apply to a plan chosen by its start date ----
@@ -310,30 +489,45 @@ class EnergyTariffCostOptionsFlow(_TariffStepsMixin, OptionsFlowWithReload):
         options = [
             selector.SelectOptionDict(
                 value=p["effective_from"],
-                label="Original plan (from the start)" if p["effective_from"] == "2000-01-01"
+                label="Original plan (from the start)"
+                if p["effective_from"] == "2000-01-01"
                 else f"Plan starting {p['effective_from']}",
             )
             for p in sorted(self._plans, key=lambda p: p["effective_from"])
         ]
-        return selector.SelectSelector(selector.SelectSelectorConfig(
-            options=options, mode=selector.SelectSelectorMode.DROPDOWN))
+        return selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=options, mode=selector.SelectSelectorMode.DROPDOWN
+            )
+        )
 
     def _plan_by_date(self, effective_from: str) -> dict[str, Any]:
         return next(p for p in self._plans if p["effective_from"] == effective_from)
 
-    async def async_step_demand(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+    async def async_step_demand(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         """Demand charge, step 1: which plan does it belong to?"""
         await self._load_plans()
         if len(self._plans) == 1 or user_input is not None:
-            self._plan_key = (user_input or {}).get("plan") or self._plans[0]["effective_from"]
+            self._plan_key = (user_input or {}).get("plan") or self._plans[0][
+                "effective_from"
+            ]
             return await self.async_step_demand_values()
-        default = next((p["effective_from"] for p in self._plans if p.get("demand_rate")), self._plans[0]["effective_from"])
+        default = next(
+            (p["effective_from"] for p in self._plans if p.get("demand_rate")),
+            self._plans[0]["effective_from"],
+        )
         return self.async_show_form(
             step_id="demand",
-            data_schema=vol.Schema({vol.Required("plan", default=default): self._plan_select()}),
+            data_schema=vol.Schema(
+                {vol.Required("plan", default=default): self._plan_select()}
+            ),
         )
 
-    async def async_step_demand_values(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+    async def async_step_demand_values(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         """Demand charge, step 2: the rate and the billed kW for each month."""
         plan = self._plan_by_date(self._plan_key)
         errors: dict[str, str] = {}
@@ -342,95 +536,173 @@ class EnergyTariffCostOptionsFlow(_TariffStepsMixin, OptionsFlowWithReload):
                 table = _parse_demand(str(user_input.get("demand_kw") or ""))
             except ValueError:
                 errors["demand_kw"] = "invalid_demand"
-            start = int(user_input.get("demand_window_start", 16))
-            end = int(user_input.get("demand_window_end", 21))
-            if not 0 <= start < end <= 24:
+            try:
+                values = tuple(
+                    float(user_input.get(key, default))
+                    for key, default in (
+                        ("demand_window_start", 16),
+                        ("demand_window_end", 21),
+                        ("demand_block_minutes", 30),
+                    )
+                )
+                if not all(value.is_integer() for value in values):
+                    raise ValueError("invalid_demand_window")
+                start, end, block = (int(value) for value in values)
+                if not 0 <= start < end <= 24 or block not in (5, 15, 30, 60):
+                    raise ValueError("invalid_demand_window")
+            except (TypeError, ValueError, OverflowError):
                 errors["demand_window_end"] = "invalid_demand_window"
+            if not _valid_amounts(user_input["demand_rate"]):
+                errors["demand_rate"] = "invalid_amount"
             if not errors:
-                plan.update({
-                    "demand_rate": float(user_input["demand_rate"]),
-                    "demand_kw": table,
-                    "demand_estimate": bool(user_input.get("demand_estimate", False)),
-                    "demand_window_start": start,
-                    "demand_window_end": end,
-                    "demand_block_minutes": int(user_input.get("demand_block_minutes", 30)),
-                })
+                plan.update(
+                    {
+                        "demand_rate": float(user_input["demand_rate"]),
+                        "demand_kw": table,
+                        "demand_estimate": bool(
+                            user_input.get("demand_estimate", False)
+                        ),
+                        "demand_window_start": start,
+                        "demand_window_end": end,
+                        "demand_block_minutes": block,
+                    }
+                )
                 plans = sorted(self._plans, key=lambda p: p["effective_from"])
-                return self.async_create_entry(title="", data=self._options_data(plans=plans))
-        current = "\n".join(f"{m}: {kw:g}" for m, kw in sorted((plan.get("demand_kw") or {}).items()))
+                return self.async_create_entry(
+                    title="", data=self._options_data(plans=plans)
+                )
+        current = "\n".join(
+            f"{m}: {kw:g}" for m, kw in sorted((plan.get("demand_kw") or {}).items())
+        )
         return self.async_show_form(
             step_id="demand_values",
-            data_schema=vol.Schema({
-                vol.Required("demand_rate", default=plan.get("demand_rate", 0.0)): _number(0, 5, "any", "AUD/kW/day"),
-                vol.Optional("demand_kw", default=current): selector.TextSelector(
-                    selector.TextSelectorConfig(multiline=True)),
-                vol.Required("demand_estimate", default=plan.get("demand_estimate", False)):
-                    selector.BooleanSelector(),
-                vol.Required("demand_window_start", default=plan.get("demand_window_start", 16)):
-                    _number(0, 23, 1, "h"),
-                vol.Required("demand_window_end", default=plan.get("demand_window_end", 21)):
-                    _number(1, 24, 1, "h"),
-                vol.Required("demand_block_minutes", default=str(plan.get("demand_block_minutes", 30))):
-                    selector.SelectSelector(selector.SelectSelectorConfig(
-                        options=["5", "15", "30", "60"], mode=selector.SelectSelectorMode.DROPDOWN)),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        "demand_rate", default=plan.get("demand_rate", 0.0)
+                    ): _number(0, 5, "any", "AUD/kW/day"),
+                    vol.Optional("demand_kw", default=current): selector.TextSelector(
+                        selector.TextSelectorConfig(multiline=True)
+                    ),
+                    vol.Required(
+                        "demand_estimate", default=plan.get("demand_estimate", False)
+                    ): selector.BooleanSelector(),
+                    vol.Required(
+                        "demand_window_start",
+                        default=plan.get("demand_window_start", 16),
+                    ): _number(0, 23, 1, "h"),
+                    vol.Required(
+                        "demand_window_end", default=plan.get("demand_window_end", 21)
+                    ): _number(1, 24, 1, "h"),
+                    vol.Required(
+                        "demand_block_minutes",
+                        default=str(plan.get("demand_block_minutes", 30)),
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=["5", "15", "30", "60"],
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                }
+            ),
             errors=errors,
         )
 
-    async def async_step_feed_in(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+    async def async_step_feed_in(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         """Stepped feed-in, step 1: which plan does it belong to?"""
         await self._load_plans()
         if len(self._plans) == 1 or user_input is not None:
-            self._plan_key = (user_input or {}).get("plan") or self._plans[0]["effective_from"]
+            self._plan_key = (user_input or {}).get("plan") or self._plans[0][
+                "effective_from"
+            ]
             return await self.async_step_feed_in_values()
-        default = next((p["effective_from"] for p in self._plans if p.get("export_daily_cap")), self._plans[0]["effective_from"])
+        default = next(
+            (p["effective_from"] for p in self._plans if p.get("export_daily_cap")),
+            self._plans[0]["effective_from"],
+        )
         return self.async_show_form(
             step_id="feed_in",
-            data_schema=vol.Schema({vol.Required("plan", default=default): self._plan_select()}),
+            data_schema=vol.Schema(
+                {vol.Required("plan", default=default): self._plan_select()}
+            ),
         )
 
-    async def async_step_feed_in_values(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+    async def async_step_feed_in_values(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         """Stepped feed-in, step 2: the two rates and the daily cap between them."""
         plan = self._plan_by_date(self._plan_key)
         bands = plan.get(CONF_EXPORT_BANDS) or []
         errors: dict[str, str] = {}
         if not bands:
             return self.async_abort(reason="no_export_meter")
+        if len(bands) != 1:
+            return self.async_abort(reason="needs_single_band")
         if user_input is not None:
-            if len(bands) != 1:
-                errors["base"] = "needs_single_band"
+            if not _valid_amounts(
+                *(
+                    user_input[key]
+                    for key in ("step_1_rate", "daily_cap", "step_2_rate")
+                )
+            ):
+                errors["base"] = "invalid_amount"
             else:
                 bands = [dict(bands[0], rate=float(user_input["step_1_rate"]))]
-                plan.update({
-                    CONF_EXPORT_BANDS: bands,
-                    "export_daily_cap": float(user_input["daily_cap"]),
-                    "export_over_cap_rate": float(user_input["step_2_rate"]),
-                })
+                plan.update(
+                    {
+                        CONF_EXPORT_BANDS: bands,
+                        "export_daily_cap": float(user_input["daily_cap"]),
+                        "export_over_cap_rate": float(user_input["step_2_rate"]),
+                    }
+                )
                 plans = sorted(self._plans, key=lambda p: p["effective_from"])
-                return self.async_create_entry(title="", data=self._options_data(plans=plans))
+                return self.async_create_entry(
+                    title="", data=self._options_data(plans=plans)
+                )
         return self.async_show_form(
             step_id="feed_in_values",
-            data_schema=vol.Schema({
-                vol.Required("step_1_rate", default=bands[0]["rate"]): _number(0, 1, "any", "AUD/kWh"),
-                vol.Required("daily_cap", default=plan.get("export_daily_cap", 0.0)): _number(0, 100, "any", "kWh/day"),
-                vol.Required("step_2_rate", default=plan.get("export_over_cap_rate", 0.0)): _number(0, 1, "any", "AUD/kWh"),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Required("step_1_rate", default=bands[0]["rate"]): _number(
+                        0, 1, "any", "AUD/kWh"
+                    ),
+                    vol.Required(
+                        "daily_cap", default=plan.get("export_daily_cap", 0.0)
+                    ): _number(0, 100, "any", "kWh/day"),
+                    vol.Required(
+                        "step_2_rate", default=plan.get("export_over_cap_rate", 0.0)
+                    ): _number(0, 1, "any", "AUD/kWh"),
+                }
+            ),
             errors=errors,
         )
 
-    async def async_step_add_plan(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+    async def async_step_add_plan(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         await self._load_plans()
         errors: dict[str, str] = {}
         if user_input is not None:
-            effective = str(user_input["effective_from"])[:10]
-            if any(p["effective_from"] == effective for p in self._plans):
+            try:
+                effective = date.fromisoformat(
+                    str(user_input["effective_from"])
+                ).isoformat()
+            except ValueError:
+                errors["effective_from"] = "invalid_date"
+            if not errors and any(
+                p["effective_from"] == effective for p in self._plans
+            ):
                 errors["effective_from"] = "duplicate_date"
-            else:
+            elif not errors:
                 self._effective_from = effective
                 return await self.async_step_import_bands()
         return self.async_show_form(
             step_id="add_plan",
-            data_schema=vol.Schema({vol.Required("effective_from"): selector.DateSelector()}),
+            data_schema=vol.Schema(
+                {vol.Required("effective_from"): selector.DateSelector()}
+            ),
             errors=errors,
         )
 
@@ -438,7 +710,9 @@ class EnergyTariffCostOptionsFlow(_TariffStepsMixin, OptionsFlowWithReload):
         plan = {
             "effective_from": self._effective_from,
             CONF_IMPORT_BANDS: self._data[CONF_IMPORT_BANDS],
-            CONF_EXPORT_BANDS: self._data.get(CONF_EXPORT_BANDS) if self._data.get(CONF_EXPORT_ENTITY) else None,
+            CONF_EXPORT_BANDS: self._data.get(CONF_EXPORT_BANDS)
+            if self._data.get(CONF_EXPORT_ENTITY)
+            else None,
             CONF_DAILY_SUPPLY: self._data[CONF_DAILY_SUPPLY],
             CONF_DAILY_MEMBERSHIP: self._data[CONF_DAILY_MEMBERSHIP],
             CONF_RATES_INCLUDE_GST: self._data[CONF_RATES_INCLUDE_GST],
@@ -446,5 +720,7 @@ class EnergyTariffCostOptionsFlow(_TariffStepsMixin, OptionsFlowWithReload):
         plans = sorted([*self._plans, plan], key=lambda p: p["effective_from"])
         return self.async_create_entry(
             title="",
-            data=self._options_data(plans=plans, devices=list(self._data.get(CONF_TRACKED_DEVICES) or [])),
+            data=self._options_data(
+                plans=plans, devices=list(self._data.get(CONF_TRACKED_DEVICES) or [])
+            ),
         )

@@ -7,30 +7,127 @@ https://github.com/tonylofgren/aurora-smart-home
 from __future__ import annotations
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryError
+from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.exceptions import (
+    ConfigEntryError,
+    ConfigEntryNotReady,
+    HomeAssistantError,
+)
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.event import async_track_entity_registry_updated_event
 from homeassistant.helpers.storage import Store
+from sqlalchemy.exc import SQLAlchemyError
 
-from .const import DOMAIN, PLATFORMS, STORAGE_VERSION
+from .const import (
+    CONF_EXPORT_ENTITY,
+    CONF_IMPORT_ENTITY,
+    CONF_SOURCES,
+    CONF_TRACKED_DEVICES,
+    DOMAIN,
+    PLATFORMS,
+    STORAGE_VERSION,
+)
 from .runtime import TariffRuntime
+from .sources import prepare_sources, source_record
 
 type TariffConfigEntry = ConfigEntry[TariffRuntime]
 
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: TariffConfigEntry) -> bool:
+    """Separate meter references from editable settings without changing identity."""
+    if entry.version != 1:
+        return False
+    if entry.minor_version < 2:
+        meter_keys = {CONF_IMPORT_ENTITY, CONF_EXPORT_ENTITY, CONF_SOURCES}
+        data = {key: value for key, value in entry.data.items() if key in meter_keys}
+        options = {
+            key: value for key, value in entry.data.items() if key not in meter_keys
+        }
+        # Existing options are the user's most recent settings and take precedence.
+        options.update(entry.options)
+        hass.config_entries.async_update_entry(
+            entry, data=data, options=options, minor_version=2
+        )
+    if entry.minor_version < 3:
+        data, options = prepare_sources(hass, entry.data, entry.options)
+        hass.config_entries.async_update_entry(
+            entry, data=data, options=options, minor_version=3
+        )
+    return True
+
+
+@callback
+def _async_track_sources(hass: HomeAssistant, entry: TariffConfigEntry) -> None:
+    """Follow source registry renames and bind newly registered source meters."""
+
+    @callback
+    def source_changed(event: Event) -> None:
+        data, options = prepare_sources(hass, entry.data, entry.options)
+        if data == entry.data and options == entry.options:
+            return
+        references_changed = any(
+            data.get(key) != entry.data.get(key)
+            for key in (CONF_IMPORT_ENTITY, CONF_EXPORT_ENTITY)
+        ) or options.get(CONF_TRACKED_DEVICES) != entry.options.get(
+            CONF_TRACKED_DEVICES
+        )
+        bindings_changed = any(
+            source_record(data, entity_id)[key]
+            != source_record(entry.data, entity_id)[key]
+            for entity_id in entities
+            for key in ("sensor_key", "ledger_key")
+        )
+        hass.config_entries.async_update_entry(entry, data=data, options=options)
+        if references_changed or bindings_changed:
+            # Do not price another source's reading while its replacement loads.
+            entry.runtime_data.async_unsubscribe()
+            hass.config_entries.async_schedule_reload(entry.entry_id)
+
+    entities = [entry.data[CONF_IMPORT_ENTITY]]
+    if entity_id := entry.data.get(CONF_EXPORT_ENTITY):
+        entities.append(entity_id)
+    entities.extend(entry.options.get(CONF_TRACKED_DEVICES, []))
+    entry.async_on_unload(
+        async_track_entity_registry_updated_event(hass, entities, source_changed)
+    )
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: TariffConfigEntry) -> bool:
+    """Set up a calculated tariff runtime and its sensor platform."""
     store: Store = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}")
     try:
+        data, options = prepare_sources(hass, entry.data, entry.options)
+        if data != entry.data or options != entry.options:
+            hass.config_entries.async_update_entry(entry, data=data, options=options)
         runtime = TariffRuntime(hass, entry, store)
-    except ValueError as err:
-        raise ConfigEntryError(f"Invalid tariff bands: {err}") from err
-    await runtime.async_start()
+    except (KeyError, TypeError, ValueError, OverflowError) as err:
+        raise ConfigEntryError(
+            "Invalid tariff configuration; review the contract settings"
+        ) from err
+    try:
+        await runtime.async_start()
+    except (OSError, SQLAlchemyError, HomeAssistantError) as err:
+        runtime.async_unsubscribe()
+        raise ConfigEntryNotReady(
+            "Recorder or storage is temporarily unavailable"
+        ) from err
+    except BaseException:
+        runtime.async_unsubscribe()
+        raise
     entry.runtime_data = runtime
     entry.async_on_unload(runtime.async_stop)
+    _async_track_sources(hass, entry)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: TariffConfigEntry) -> bool:
+    """Unload sensors; Home Assistant then awaits the registered runtime cleanup."""
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 
+async def async_remove_entry(hass: HomeAssistant, entry: TariffConfigEntry) -> None:
+    """Delete persisted usage and demand data when a contract is removed."""
+    await Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}").async_remove()
