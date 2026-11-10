@@ -749,7 +749,8 @@ async def _setup_estimating(hass, freezer, monkeypatch, rows, **plan_extra):
         return {}
 
     monkeypatch.setattr(
-        "custom_components.ha_power_bill_au.runtime.statistics_during_period", fake_stats
+        "custom_components.ha_power_bill_au.runtime.statistics_during_period",
+        fake_stats,
     )
     entry = MockConfigEntry(
         domain=DOMAIN,

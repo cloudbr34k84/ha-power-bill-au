@@ -47,10 +47,12 @@ def _inputs(recorder_mock, enable_custom_integrations, hass, monkeypatch):
     for entity in (IMPORT, EXPORT, DEVICE):
         hass.states.async_set(entity, "100", ATTRS)
     monkeypatch.setattr(
-        "custom_components.ha_power_bill_au.async_setup_entry", AsyncMock(return_value=True)
+        "custom_components.ha_power_bill_au.async_setup_entry",
+        AsyncMock(return_value=True),
     )
     monkeypatch.setattr(
-        "custom_components.ha_power_bill_au.async_unload_entry", AsyncMock(return_value=True)
+        "custom_components.ha_power_bill_au.async_unload_entry",
+        AsyncMock(return_value=True),
     )
 
 

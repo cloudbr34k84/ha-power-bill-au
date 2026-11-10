@@ -19,7 +19,9 @@ from homeassistant.helpers.storage import Store
 from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.ha_power_bill_au.const import DOMAIN, STORAGE_VERSION
-from custom_components.ha_power_bill_au.diagnostics import async_get_config_entry_diagnostics
+from custom_components.ha_power_bill_au.diagnostics import (
+    async_get_config_entry_diagnostics,
+)
 from custom_components.ha_power_bill_au.runtime import TariffRuntime
 
 IMPORT = "sensor.audit_import"
@@ -235,7 +237,8 @@ async def test_in_flight_demand_query_cannot_update_an_unloaded_runtime(
 
     recorder = SimpleNamespace(async_add_executor_job=AsyncMock(side_effect=query))
     monkeypatch.setattr(
-        "custom_components.ha_power_bill_au.runtime.get_instance", lambda hass_: recorder
+        "custom_components.ha_power_bill_au.runtime.get_instance",
+        lambda hass_: recorder,
     )
     scanning = asyncio.create_task(runtime._async_scan_demand(1, reprice=True))
     await entered.wait()
