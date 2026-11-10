@@ -121,7 +121,8 @@ Tracked devices:
 - **Import cost today** and **Import cost month to date**: Usage costs including fixed and applicable demand charges.
 - **Net cost today** and **Net cost month to date**: Import costs less export credits.
 - **Export credit today** and **Export credit month to date**: Feed-in credits when an export meter is configured.
-- **Import cost total** and **Export credit total**: Lifetime cost and credit totals suitable for the Energy dashboard's cost fields.
+- **Import cost total (Energy dashboard)** and **Export credit total (Energy dashboard)**: Lifetime cost and credit totals suitable for the Energy dashboard's cost fields.
+  To select them, open the integration's **Configure** menu and choose **Add to the Energy dashboard**. It asks for confirmation and only fills empty cost fields of matching grid meters.
 - **Band energy today** and **Band energy month to date**: Energy for each configured import or export band. Stepped feed-in reports a separate value for each step.
 - **Peak demand this month**: The demand being charged, with estimated and billed values in attributes when a demand charge is configured.
 - **Tracked-device costs**: Today, month-to-date and lifetime costs for each additional meter.

@@ -6,6 +6,7 @@ https://github.com/tonylofgren/aurora-smart-home
 
 from __future__ import annotations
 
+from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import (
@@ -14,6 +15,7 @@ from homeassistant.exceptions import (
     HomeAssistantError,
 )
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_entity_registry_updated_event
 from homeassistant.helpers.storage import Store
 from sqlalchemy.exc import SQLAlchemyError
@@ -119,8 +121,49 @@ async def async_setup_entry(hass: HomeAssistant, entry: TariffConfigEntry) -> bo
     entry.runtime_data = runtime
     entry.async_on_unload(runtime.async_stop)
     _async_track_sources(hass, entry)
+    first_setup = not er.async_entries_for_config_entry(
+        er.async_get(hass), entry.entry_id
+    )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    if first_setup:
+        _async_notify_energy_dashboard(hass, entry)
     return True
+
+
+@callback
+def _async_notify_energy_dashboard(
+    hass: HomeAssistant, entry: TariffConfigEntry
+) -> None:
+    """Tell a new user which sensors belong in the Energy dashboard."""
+    registry = er.async_get(hass)
+    lines = []
+    for key, label in (
+        (
+            "import_cost_total",
+            "Grid consumption: use an entity tracking the total costs",
+        ),
+        (
+            "export_credit_total",
+            "Return to grid: use an entity tracking the total compensation",
+        ),
+    ):
+        entity_id = registry.async_get_entity_id(
+            "sensor", DOMAIN, f"{entry.entry_id}_{key}"
+        )
+        if entity_id:
+            lines.append(f"- {label}: `{entity_id}`")
+    if not lines:
+        return
+    persistent_notification.async_create(
+        hass,
+        "In **Settings > Dashboards > Energy**, pick these sensors:\n\n"
+        + "\n".join(lines)
+        + "\n\nOr let the integration do it: open **Settings > Devices & services > "
+        "HA Power Bill AU > Configure** and choose **Add to the Energy dashboard**."
+        "\n\nThe today and month-to-date sensors reset each period, so don't use them there.",
+        title="HA Power Bill AU: Energy dashboard setup",
+        notification_id=f"{DOMAIN}_energy_{entry.entry_id}",
+    )
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: TariffConfigEntry) -> bool:

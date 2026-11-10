@@ -51,6 +51,25 @@ For each contract:
 - Lifetime totals for import cost, export credit and each tracked meter. These use the
   `total` state class, so you can point the Energy dashboard at them.
 
+### Using it in the Energy dashboard
+
+In **Settings > Dashboards > Energy > Grid**, pick these two sensors. Only the lifetime
+totals appear in the Energy dashboard's cost pickers, because the today and month-to-date
+sensors reset each period.
+
+| Energy dashboard field | Sensor |
+|---|---|
+| Grid consumption: *Use an entity tracking the total costs* | `Import cost total (Energy dashboard)` |
+| Return to grid: *Use an entity tracking the total compensation* | `Export credit total (Energy dashboard)` |
+
+A new contract also shows a notification with the exact entity IDs.
+
+To have the integration select them for you, open **Settings > Devices & services >
+HA Power Bill AU > Configure** and choose **Add to the Energy dashboard**. It shows the
+change and waits for you to confirm. It only fills an empty cost field of a grid meter that
+is already in the Energy dashboard and matches this contract's import or export meter. A
+meter that already has a cost sensor or a price set is left as it is.
+
 ## Upgrading from the previous integration
 
 The integration now uses the `ha_power_bill_au` domain.
@@ -109,6 +128,8 @@ Settings → Devices & Services → HA Power Bill AU → Configure:
   new plan. Earlier usage keeps the plan it was recorded under.
 - **Demand charge** if your plan charges for your highest kW each month.
 - **Stepped feed-in** if your solar feed-in tariff pays a higher rate for the first kWh each day.
+- **Add to the Energy dashboard** to select the lifetime cost and credit sensors for your
+  grid meters. See [Using it in the Energy dashboard](#using-it-in-the-energy-dashboard).
 - **Tracked devices** to add or remove extra energy sensors (an EV charger, a pool pump). Each
   one gets cost today, month to date and lifetime sensors. Deselecting a device removes its sensors.
 
@@ -224,6 +245,7 @@ ha-power-bill-au/
 │       ├── config_flow.py
 │       ├── const.py
 │       ├── diagnostics.py
+│       ├── energy_dashboard.py
 │       ├── engine.py
 │       ├── runtime.py
 │       ├── sensor.py
@@ -243,8 +265,8 @@ The integration folder and manifest domain must both remain `ha_power_bill_au`.
 
 ### Release versions
 
-The current manifest version is `0.2.3` in
-`custom_components/ha_power_bill_au/manifest.json`. The matching release tag is `v0.2.3`; the manifest value has no `v` prefix.
+The current manifest version is `0.2.4` in
+`custom_components/ha_power_bill_au/manifest.json`. The matching release tag is `v0.2.4`; the manifest value has no `v` prefix.
 For later releases, update the manifest and [CHANGELOG.md](CHANGELOG.md) before tagging:
 `0.1.1` for a patch, `0.2.0` for a feature release during initial development, and `1.0.0`
 for the first stable release. Never reuse a published version number.

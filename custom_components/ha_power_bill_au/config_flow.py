@@ -40,6 +40,7 @@ from .const import (
     DOMAIN,
     provider_name,
 )
+from .energy_dashboard import ADD, BLOCKED, DONE, async_plan, async_save
 from .engine import Band, validate_bands
 from .sources import meter_pair, prepare_sources
 from .validation import valid_energy_sensor
@@ -371,7 +372,45 @@ class EnergyTariffCostOptionsFlow(_TariffStepsMixin, OptionsFlowWithReload):
     ) -> ConfigFlowResult:
         return self.async_show_menu(
             step_id="init",
-            menu_options=["provider", "add_plan", "demand", "feed_in", "devices"],
+            menu_options=[
+                "provider",
+                "add_plan",
+                "demand",
+                "feed_in",
+                "devices",
+                "energy_dashboard",
+            ],
+        )
+
+    async def async_step_energy_dashboard(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Select the lifetime sensors in the Energy dashboard after the user confirms."""
+        if "energy" not in self.hass.config.components:
+            return self.async_abort(reason="energy_not_loaded")
+        links, sources = await async_plan(self.hass, self.config_entry)
+        changes = [link for link in links if link.status == ADD]
+        if not changes:
+            statuses = {link.status for link in links}
+            if BLOCKED in statuses:
+                return self.async_abort(reason="energy_cost_configured")
+            if DONE in statuses:
+                return self.async_abort(reason="energy_already_added")
+            return self.async_abort(reason="energy_no_grid_source")
+        placeholders = {
+            "changes": "\n".join(
+                f"- `{link.sensor}` for `{link.meter}`" for link in changes
+            )
+        }
+        if user_input is not None:
+            await async_save(self.hass, sources)
+            return self.async_abort(
+                reason="energy_added", description_placeholders=placeholders
+            )
+        return self.async_show_form(
+            step_id="energy_dashboard",
+            data_schema=vol.Schema({}),
+            description_placeholders=placeholders,
         )
 
     async def async_step_provider(

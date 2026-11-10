@@ -128,6 +128,13 @@ async def test_config_flow_setup_and_costs(hass: HomeAssistant, freezer) -> None
     lifetime = hass.states.get("sensor.test_import_cost_total")
     assert float(lifetime.state) == pytest.approx(0.08285 + 1.9913, abs=0.01)
     assert lifetime.attributes["state_class"] == "total"
+    assert lifetime.attributes["friendly_name"].endswith("(Energy dashboard)")
+
+    # Resetting cost sensors must stay out of the Energy dashboard's cost pickers.
+    assert (
+        "state_class" not in hass.states.get("sensor.test_import_cost_today").attributes
+    )
+    assert "state_class" not in month.attributes
 
 
 async def test_options_flow_rejects_gap_then_saves(hass: HomeAssistant) -> None:

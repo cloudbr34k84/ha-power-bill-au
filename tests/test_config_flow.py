@@ -16,6 +16,7 @@ import pytest
 from homeassistant.config_entries import SOURCE_USER
 from homeassistant.data_entry_flow import FlowResultType, InvalidData
 from homeassistant.helpers import entity_registry as er
+from homeassistant.setup import async_setup_component
 from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.ha_power_bill_au.config_flow import (
@@ -24,6 +25,14 @@ from custom_components.ha_power_bill_au.config_flow import (
     _valid_amounts,
 )
 from custom_components.ha_power_bill_au.const import CONF_SOURCES, DOMAIN
+from custom_components.ha_power_bill_au.energy_dashboard import (
+    ADD,
+    BLOCKED,
+    DONE,
+    MISSING,
+    async_get_manager,
+    link_sensor,
+)
 from custom_components.ha_power_bill_au.sources import meter_pair, prepare_sources
 
 IMPORT = "sensor.flow_import"
@@ -565,6 +574,137 @@ async def test_unsupported_feed_in_plan_finishes_with_clear_abort(hass, bands, r
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == reason
     assert entry.unique_id == f"{IMPORT}|{EXPORT}"
+
+
+def _grid(**changes):
+    return {
+        "type": "grid",
+        "stat_energy_from": IMPORT,
+        "stat_energy_to": EXPORT,
+        "stat_cost": None,
+        "stat_compensation": None,
+        "entity_energy_price": None,
+        "number_energy_price": None,
+        "entity_energy_price_export": None,
+        "number_energy_price_export": None,
+        "cost_adjustment_day": 0.0,
+        **changes,
+    }
+
+
+async def _energy(hass, entry, sources):
+    """Set up the Energy dashboard with `sources` and register the lifetime sensors."""
+    assert await async_setup_component(hass, "energy", {})
+    manager = await async_get_manager(hass)
+    await manager.async_update({"energy_sources": sources})
+    registry = er.async_get(hass)
+    return manager, [
+        registry.async_get_or_create(
+            "sensor",
+            DOMAIN,
+            f"{entry.entry_id}_{key}",
+            config_entry=entry,
+            suggested_object_id=f"example_{key}",
+        ).entity_id
+        for key in ("import_cost_total", "export_credit_total")
+    ]
+
+
+async def test_energy_dashboard_adds_lifetime_sensors_only_after_confirmation(hass):
+    entry = await _entry(hass)
+    solar = {"type": "solar", "stat_energy_from": "sensor.solar"}
+    manager, (cost, credit) = await _energy(hass, entry, [solar, _grid(name="Grid")])
+    options = copy.deepcopy(dict(entry.options))
+
+    result = await _options(hass, entry, "energy_dashboard")
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "energy_dashboard"
+    changes = result["description_placeholders"]["changes"]
+    assert cost in changes and IMPORT in changes
+    assert credit in changes and EXPORT in changes
+    # Showing the confirmation must not change anything.
+    assert manager.data["energy_sources"] == [solar, _grid(name="Grid")]
+
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "energy_added"
+    assert manager.data["energy_sources"] == [
+        solar,
+        _grid(name="Grid", stat_cost=cost, stat_compensation=credit),
+    ]
+    assert entry.options == options
+
+    result = await _options(hass, entry, "energy_dashboard")
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "energy_already_added"
+
+
+@pytest.mark.parametrize(
+    ("sources", "reason"),
+    [
+        ([], "energy_no_grid_source"),
+        (
+            [_grid(stat_energy_from="sensor.other", stat_energy_to=None)],
+            "energy_no_grid_source",
+        ),
+        (
+            [_grid(number_energy_price=0.3, stat_compensation="sensor.other")],
+            "energy_cost_configured",
+        ),
+    ],
+)
+async def test_energy_dashboard_leaves_other_setups_unchanged(hass, sources, reason):
+    entry = await _entry(hass)
+    manager, _sensors = await _energy(hass, entry, copy.deepcopy(sources))
+    result = await _options(hass, entry, "energy_dashboard")
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == reason
+    assert manager.data["energy_sources"] == sources
+
+
+async def test_energy_dashboard_fills_the_free_side_and_keeps_the_users_price(hass):
+    entry = await _entry(hass)
+    grid = _grid(entity_energy_price_export="sensor.fit_price")
+    manager, (cost, _credit) = await _energy(hass, entry, [grid])
+    result = await _options(hass, entry, "energy_dashboard")
+    assert EXPORT not in result["description_placeholders"]["changes"]
+    await hass.config_entries.options.async_configure(result["flow_id"], {})
+    assert manager.data["energy_sources"] == [{**grid, "stat_cost": cost}]
+
+
+async def test_energy_dashboard_needs_the_energy_integration_and_sensors(hass):
+    entry = await _entry(hass, export=False)
+    result = await _options(hass, entry, "energy_dashboard")
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "energy_not_loaded"
+
+    # The lifetime sensor is not registered (for example the entry failed to load).
+    assert await async_setup_component(hass, "energy", {})
+    manager = await async_get_manager(hass)
+    await manager.async_update({"energy_sources": [_grid()]})
+    result = await _options(hass, entry, "energy_dashboard")
+    assert result["reason"] == "energy_no_grid_source"
+    assert manager.data["energy_sources"] == [_grid()]
+
+
+def test_link_sensor_supports_grid_sources_from_older_home_assistant_releases():
+    free = {"stat_energy_from": IMPORT, "stat_cost": None}
+    priced = {
+        "stat_energy_to": EXPORT,
+        "stat_compensation": None,
+        "number_energy_price": 0.1,
+    }
+    sources = [
+        {"type": "gas", "stat_energy_from": IMPORT},
+        {"type": "grid", "flow_from": [free], "flow_to": [priced]},
+    ]
+    assert link_sensor(sources, IMPORT, "sensor.cost", export=False) == ADD
+    assert free["stat_cost"] == "sensor.cost"
+    assert link_sensor(sources, IMPORT, "sensor.cost", export=False) == DONE
+    assert link_sensor(sources, EXPORT, "sensor.credit", export=True) == BLOCKED
+    assert priced["stat_compensation"] is None
+    assert link_sensor(sources, "sensor.other", "sensor.cost", export=False) == MISSING
+    assert "stat_cost" not in sources[0]
 
 
 async def test_incomplete_tariff_flow_cannot_finish():

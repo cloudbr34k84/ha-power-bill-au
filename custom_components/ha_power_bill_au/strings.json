@@ -211,7 +211,8 @@
           "add_plan": "Add a plan from a date (rate or plan change)",
           "demand": "Demand charge (a monthly fee based on your peak kW)",
           "feed_in": "Stepped feed-in (a higher rate for the first kWh each day)",
-          "devices": "Tracked devices (extra cost sensors)"
+          "devices": "Tracked devices (extra cost sensors)",
+          "energy_dashboard": "Add to the Energy dashboard"
         }
       },
       "demand": {
@@ -287,6 +288,10 @@
         "data_description": {
           "provider": "The retailer or label for this contract. Used for the device and sensor names; entity IDs stay the same when it changes."
         }
+      },
+      "energy_dashboard": {
+        "title": "Add to the Energy dashboard",
+        "description": "This selects this contract's lifetime sensors as the cost and compensation of your grid meters in the Energy dashboard:\n\n{changes}\n\nNothing else in the Energy dashboard changes. A grid meter that already has a cost sensor or a price set, or that isn't in the Energy dashboard, is left as it is. Costs appear after Home Assistant's next hourly statistics run.\n\nSelect **Submit** to make this change."
       }
     },
     "error": {
@@ -307,7 +312,12 @@
     },
     "abort": {
       "no_export_meter": "This plan has no feed-in band. Set up an export meter first.",
-      "needs_single_band": "Stepped feed-in needs a plan with one export band covering the full day. Add a plan with a single export band, then configure stepped feed-in for it."
+      "needs_single_band": "Stepped feed-in needs a plan with one export band covering the full day. Add a plan with a single export band, then configure stepped feed-in for it.",
+      "energy_added": "Added to the Energy dashboard:\n\n{changes}\n\nCosts appear after Home Assistant's next hourly statistics run.",
+      "energy_already_added": "The Energy dashboard already uses this contract's lifetime sensors. Nothing was changed.",
+      "energy_cost_configured": "Your grid meter in the Energy dashboard already has a different cost sensor or a price set. Nothing was changed. To use this contract instead, clear that setting in Settings > Dashboards > Energy, then run this again.",
+      "energy_no_grid_source": "The Energy dashboard has no grid source using this contract's meters. Add the import meter (and export meter) under Settings > Dashboards > Energy first, then run this again. Nothing was changed.",
+      "energy_not_loaded": "The Energy dashboard is not enabled in this Home Assistant. Nothing was changed."
     }
   }
 }

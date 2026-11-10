@@ -33,6 +33,8 @@ class TariffSensorDescription(SensorEntityDescription):
     value_fn: Callable[[TariffRuntime], Any]
     attrs_fn: Callable[[TariffRuntime], dict[str, Any]] | None = None
     source: str | None = None
+    # Name used to build the entity ID, when it must differ from the display name.
+    object_name: str | None = None
 
 
 def _current_attrs(rt: TariffRuntime) -> dict[str, Any]:
@@ -43,12 +45,14 @@ def _current_attrs(rt: TariffRuntime) -> dict[str, Any]:
 def _money(
     key: str, name: str, fn: Callable[[TariffRuntime], Any], *, source: str = "import"
 ) -> TariffSensorDescription:
+    """Cost for today or the month to date. It resets each period, so it has no
+    state class: that keeps it out of the Energy dashboard's cost picker, which
+    needs a value that only rises (use the lifetime "total" sensors there)."""
     return TariffSensorDescription(
         key=key,
         name=name,
         native_unit_of_measurement="AUD",
         device_class=SensorDeviceClass.MONETARY,
-        state_class=SensorStateClass.TOTAL,  # monetary sensors only accept total or none
         suggested_display_precision=2,
         value_fn=fn,
         source=source,
@@ -56,7 +60,12 @@ def _money(
 
 
 def _lifetime(
-    key: str, name: str, fn: Callable[[TariffRuntime], Any], *, source: str = "import"
+    key: str,
+    name: str,
+    fn: Callable[[TariffRuntime], Any],
+    *,
+    source: str = "import",
+    object_name: str | None = None,
 ) -> TariffSensorDescription:
     """Cumulative cost, for the Energy dashboard. Only ever rises, so state class is total."""
     return TariffSensorDescription(
@@ -68,6 +77,7 @@ def _lifetime(
         suggested_display_precision=2,
         value_fn=fn,
         source=source,
+        object_name=object_name,
     )
 
 
@@ -180,7 +190,10 @@ def _descriptions(rt: TariffRuntime) -> list[TariffSensorDescription]:
         )
     descriptions.append(
         _lifetime(
-            "import_cost_total", "Import cost total", lambda r: r.lifetime_import()
+            "import_cost_total",
+            "Import cost total (Energy dashboard)",
+            lambda r: r.lifetime_import(),
+            object_name="Import cost total",
         )
     )
     if rt.export_entity:
@@ -199,9 +212,10 @@ def _descriptions(rt: TariffRuntime) -> list[TariffSensorDescription]:
             ),
             _lifetime(
                 "export_credit_total",
-                "Export credit total",
+                "Export credit total (Energy dashboard)",
                 lambda r: r.lifetime_export(),
                 source="export",
+                object_name="Export credit total",
             ),
         ]
     for device in rt.device_entities:
@@ -262,6 +276,11 @@ class TariffSensor(SensorEntity):
         """Keep tariff information available while marking missing meter data honestly."""
         source = self.entity_description.source
         return source is None or self._runtime.source_available(source)
+
+    @property
+    def suggested_object_id(self) -> str | None:
+        """Keep entity IDs stable when the display name carries an extra hint."""
+        return self.entity_description.object_name or super().suggested_object_id
 
     @property
     def native_value(self) -> Any:
