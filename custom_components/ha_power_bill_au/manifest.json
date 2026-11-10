@@ -1,0 +1,17 @@
+{
+  "domain": "ha_power_bill_au",
+  "name": "HA Power Bill AU",
+  "codeowners": [
+    "@cloudbr34k84"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "recorder"
+  ],
+  "documentation": "https://github.com/cloudbr34k84/ha-power-bill-au",
+  "integration_type": "helper",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/cloudbr34k84/ha-power-bill-au/issues",
+  "requirements": [],
+  "version": "0.2.0"
+}

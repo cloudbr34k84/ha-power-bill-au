@@ -2,7 +2,7 @@
 # https://github.com/tonylofgren/aurora-smart-home
 
 name: Feature request
-description: Suggest an improvement to Power Bill.
+description: Suggest an improvement to HA Power Bill AU.
 title: "[Feature]: "
 body:
   - type: textarea

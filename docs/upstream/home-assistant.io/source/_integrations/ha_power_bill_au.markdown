@@ -1,5 +1,5 @@
 ---
-title: Power Bill
+title: HA Power Bill AU
 description: Calculate electricity costs and feed-in credits from your Home Assistant energy meters and tariff plans.
 ha_category:
   - Energy
@@ -9,19 +9,19 @@ ha_iot_class: Calculated
 ha_config_flow: true
 ha_codeowners:
   - '@cloudbr34k84'
-ha_domain: power_bill
+ha_domain: ha_power_bill_au
 ha_platforms:
   - diagnostics
   - sensor
 ha_integration_type: helper
 ---
 
-The **Power Bill** {% term integration %} calculates electricity costs from energy
+The **HA Power Bill AU** {% term integration %} calculates electricity costs from energy
 sensors already in Home Assistant. Enter your electricity contract's rates and
 charges to track today's costs, monthly costs, lifetime costs and solar feed-in
 credits. Dated tariff plans let you apply rate changes to the appropriate usage.
 
-Power Bill uses local sensor readings and [Recorder](/integrations/recorder/)
+HA Power Bill AU uses local sensor readings and [Recorder](/integrations/recorder/)
 statistics. It does not connect to your energy retailer or require a retailer account.
 Costs use Australian dollars and Australian GST rules.
 

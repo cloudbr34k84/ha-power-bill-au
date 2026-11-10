@@ -17,7 +17,7 @@ import pytest
 ENGINE_PATH = (
     pathlib.Path(__file__).resolve().parents[1]
     / "custom_components"
-    / "power_bill"
+    / "ha_power_bill_au"
     / "engine.py"
 )
 _spec = importlib.util.spec_from_file_location("engine", ENGINE_PATH)

@@ -205,7 +205,7 @@
         }
       },
       "init": {
-        "title": "Power Bill options",
+        "title": "HA Power Bill AU options",
         "menu_options": {
           "provider": "Energy provider name",
           "add_plan": "Add a plan from a date (rate or plan change)",
@@ -236,7 +236,7 @@
       },
       "demand_values": {
         "title": "Demand charge",
-        "description": "Some plans charge a daily fee for every kW of your highest demand that month. On your bill this is the line **Demand (kW/Day)**: the number before 'KW' is the billed kW for that month, and the rate is the dollar amount after it.\n\nEnter the rate, then one line for each month you were billed, for example:\n`2025-01: 13.2`\n`2025-02: 10.1`\n\nLeave the months empty if your plan has no demand charge.\n\n**Estimate from my meter:** switch this on to have Power Bill work out your highest demand itself from your import meter, so the month's demand charge shows up before the bill arrives. A kW you enter for a month always replaces the estimate. Set the hours and block length to match your bill (for example 'Demand 7 days a week: 4:00pm to 9:00pm').",
+        "description": "Some plans charge a daily fee for every kW of your highest demand that month. On your bill this is the line **Demand (kW/Day)**: the number before 'KW' is the billed kW for that month, and the rate is the dollar amount after it.\n\nEnter the rate, then one line for each month you were billed, for example:\n`2025-01: 13.2`\n`2025-02: 10.1`\n\nLeave the months empty if your plan has no demand charge.\n\n**Estimate from my meter:** switch this on to have HA Power Bill AU work out your highest demand itself from your import meter, so the month's demand charge shows up before the bill arrives. A kW you enter for a month always replaces the estimate. Set the hours and block length to match your bill (for example 'Demand 7 days a week: 4:00pm to 9:00pm').",
         "data": {
           "demand_rate": "Demand rate (AUD per kW per day)",
           "demand_kw": "Billed kW for each month",

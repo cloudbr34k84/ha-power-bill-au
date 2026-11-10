@@ -18,9 +18,9 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.storage import Store
 from pytest_homeassistant.common import MockConfigEntry
 
-from custom_components.power_bill.const import DOMAIN, STORAGE_VERSION
-from custom_components.power_bill.diagnostics import async_get_config_entry_diagnostics
-from custom_components.power_bill.runtime import TariffRuntime
+from custom_components.ha_power_bill_au.const import DOMAIN, STORAGE_VERSION
+from custom_components.ha_power_bill_au.diagnostics import async_get_config_entry_diagnostics
+from custom_components.ha_power_bill_au.runtime import TariffRuntime
 
 IMPORT = "sensor.audit_import"
 EXPORT = "sensor.audit_export"
@@ -150,7 +150,7 @@ async def test_history_uses_available_dates_and_does_not_double_book_daily_rows(
         return {}
 
     monkeypatch.setattr(
-        "custom_components.power_bill.runtime.statistics_during_period", stats
+        "custom_components.ha_power_bill_au.runtime.statistics_during_period", stats
     )
     entry = await _setup(hass, plans=[_plan(daily_supply=1)])
     runtime = entry.runtime_data
@@ -235,7 +235,7 @@ async def test_in_flight_demand_query_cannot_update_an_unloaded_runtime(
 
     recorder = SimpleNamespace(async_add_executor_job=AsyncMock(side_effect=query))
     monkeypatch.setattr(
-        "custom_components.power_bill.runtime.get_instance", lambda hass_: recorder
+        "custom_components.ha_power_bill_au.runtime.get_instance", lambda hass_: recorder
     )
     scanning = asyncio.create_task(runtime._async_scan_demand(1, reprice=True))
     await entered.wait()
@@ -306,7 +306,7 @@ async def test_reload_preserves_uncompiled_energy_and_deduplicates_it_after_comp
         return {IMPORT: list(rows)} if period == "hour" else {}
 
     monkeypatch.setattr(
-        "custom_components.power_bill.runtime.statistics_during_period", stats
+        "custom_components.ha_power_bill_au.runtime.statistics_during_period", stats
     )
     entry = await _setup(hass)
     hass.states.async_set(IMPORT, "101", ATTRS)
@@ -412,7 +412,7 @@ async def test_checklist_null_recorder_response_retries_instead_of_returning_zer
     hass, monkeypatch
 ):
     monkeypatch.setattr(
-        "custom_components.power_bill.runtime.statistics_during_period",
+        "custom_components.ha_power_bill_au.runtime.statistics_during_period",
         lambda *args: None,
     )
     entry = MockConfigEntry(
@@ -431,7 +431,7 @@ async def test_checklist_missing_statistic_rows_are_handled_and_fallback_is_logg
     hass, monkeypatch, caplog
 ):
     monkeypatch.setattr(
-        "custom_components.power_bill.runtime.statistics_during_period",
+        "custom_components.ha_power_bill_au.runtime.statistics_during_period",
         lambda *args: {IMPORT: None},
     )
     entry = await _setup(hass)
@@ -439,7 +439,7 @@ async def test_checklist_missing_statistic_rows_are_handled_and_fallback_is_logg
     messages = [
         record.getMessage()
         for record in caplog.records
-        if record.name == "custom_components.power_bill.runtime"
+        if record.name == "custom_components.ha_power_bill_au.runtime"
     ]
     assert any("No import history" in message for message in messages)
     assert all(IMPORT not in message and "Audit" not in message for message in messages)
@@ -453,14 +453,14 @@ async def test_checklist_filtered_statistics_are_logged_without_identifiers(
         "change": float("nan"),
     }
     monkeypatch.setattr(
-        "custom_components.power_bill.runtime.statistics_during_period",
+        "custom_components.ha_power_bill_au.runtime.statistics_during_period",
         lambda *args: {IMPORT: [row]},
     )
     await _setup(hass)
     messages = [
         record.getMessage()
         for record in caplog.records
-        if record.name == "custom_components.power_bill.runtime"
+        if record.name == "custom_components.ha_power_bill_au.runtime"
     ]
     assert any("Filtered" in message for message in messages)
     assert all(IMPORT not in message and "Audit" not in message for message in messages)
@@ -476,7 +476,7 @@ async def test_checklist_demand_error_logs_do_not_expose_exception_details(
     records = [
         record
         for record in caplog.records
-        if record.name == "custom_components.power_bill.runtime"
+        if record.name == "custom_components.ha_power_bill_au.runtime"
     ]
     assert any("RuntimeError" in record.getMessage() for record in records)
     assert all(

@@ -17,8 +17,8 @@ from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant.common import MockConfigEntry
 
-from custom_components.power_bill.const import DOMAIN
-from custom_components.power_bill.engine import Band, Plan, Schedule
+from custom_components.ha_power_bill_au.const import DOMAIN
+from custom_components.ha_power_bill_au.engine import Band, Plan, Schedule
 
 IMPORT_SENSOR = "sensor.test_import_kwh"
 
@@ -749,7 +749,7 @@ async def _setup_estimating(hass, freezer, monkeypatch, rows, **plan_extra):
         return {}
 
     monkeypatch.setattr(
-        "custom_components.power_bill.runtime.statistics_during_period", fake_stats
+        "custom_components.ha_power_bill_au.runtime.statistics_during_period", fake_stats
     )
     entry = MockConfigEntry(
         domain=DOMAIN,

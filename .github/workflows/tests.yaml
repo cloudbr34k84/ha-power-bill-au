@@ -4,6 +4,7 @@
 name: Tests
 
 on:
+  workflow_call:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   push:
@@ -50,7 +51,7 @@ jobs:
       - name: Run tests
         run: >-
           python -m coverage run --branch
-          --source=custom_components.power_bill.config_flow
+          --source=custom_components.ha_power_bill_au.config_flow
           -m pytest --junitxml=test-results/pytest.xml
 
       - name: Require full config flow coverage

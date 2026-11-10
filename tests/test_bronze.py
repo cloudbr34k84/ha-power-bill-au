@@ -13,8 +13,8 @@ from homeassistant.config_entries import ConfigEntryState
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant.common import MockConfigEntry
 
-from custom_components.power_bill import async_migrate_entry
-from custom_components.power_bill.const import DOMAIN
+from custom_components.ha_power_bill_au import async_migrate_entry
+from custom_components.ha_power_bill_au.const import DOMAIN
 
 IMPORT = "sensor.bronze_import"
 EXPORT = "sensor.bronze_export"

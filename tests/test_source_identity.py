@@ -12,8 +12,8 @@ import pytest
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant.common import MockConfigEntry
 
-from custom_components.power_bill.const import DOMAIN
-from custom_components.power_bill.sources import source_record
+from custom_components.ha_power_bill_au.const import DOMAIN
+from custom_components.ha_power_bill_au.sources import source_record
 
 IMPORT = "sensor.identity_import"
 DEVICE = "sensor.identity_device"

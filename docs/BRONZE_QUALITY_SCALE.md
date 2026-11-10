@@ -4,12 +4,12 @@
 
 This assessment applies the 20 rules supplied in
 `brads_dev/ha-integration-dev/HA Core and integrations/HA Integration quality scale/Bronze`
-to the development copy of **Power Bill** (`custom_components/power_bill`).
-The repository folder remains `energy_tariff_cost`; its Home Assistant domain is
-`power_bill`.
+to the development copy of **HA Power Bill AU** (`custom_components/ha_power_bill_au`).
+The repository folder remains `ha-power-bill-au`; its Home Assistant domain is
+`ha_power_bill_au`.
 
 The machine-readable record is
-[quality_scale.yaml](../custom_components/power_bill/quality_scale.yaml). `done`
+[quality_scale.yaml](../custom_components/ha_power_bill_au/quality_scale.yaml). `done`
 means that the implementation satisfies the local assessment, `exempt` cites an
 exception explicitly allowed by the supplied rule, and `todo` identifies an
 unverified or outstanding requirement. This is a custom-integration assessment,
@@ -20,23 +20,23 @@ an official Bronze rating.
 
 | Bronze rule | Status | Evidence or remaining work |
 | --- | --- | --- |
-| `action-setup` | Exempt | Power Bill registers no integration-specific actions. There are no actions to move into `async_setup`. |
-| `appropriate-polling` | Exempt | [runtime.py](../custom_components/power_bill/runtime.py) listens to local source-state changes. The minute timer updates tariff and date boundaries; optional demand scans read local recorder statistics every five minutes, matching the statistics resolution. No external device or service is polled. |
+| `action-setup` | Exempt | HA Power Bill AU registers no integration-specific actions. There are no actions to move into `async_setup`. |
+| `appropriate-polling` | Exempt | [runtime.py](../custom_components/ha_power_bill_au/runtime.py) listens to local source-state changes. The minute timer updates tariff and date boundaries; optional demand scans read local recorder statistics every five minutes, matching the statistics resolution. No external device or service is polled. |
 | `brands` | Todo | Local `brand/` contains standard and high-resolution icons and logos. The supplied rule requires those assets in `home-assistant/brands` and explicitly permits no exception. The [upstream preparation](upstream/) is not evidence of an accepted upstream contribution. |
-| `common-modules` | Done | The shared calculated runtime is in [runtime.py](../custom_components/power_bill/runtime.py). There is no `DataUpdateCoordinator` subclass or cross-platform entity base; [sensor.py](../custom_components/power_bill/sensor.py) is the only platform. The rule does not require inventing either abstraction. |
-| `config-flow` | Done | [config_flow.py](../custom_components/power_bill/config_flow.py) provides selector-based UI setup and options. Every field has help text. Meter references and persistent source identities stay in `data`; adjustable tariffs, labels and tracked-meter selections are stored in `options`. The minor-version 1.3 migration preserves existing option precedence, identity and saved usage; [migration tests](../tests/test_bronze.py) verify reload behavior. The provider field is a tariff-contract label supplied by the user because this helper has no external device name to retrieve. |
+| `common-modules` | Done | The shared calculated runtime is in [runtime.py](../custom_components/ha_power_bill_au/runtime.py). There is no `DataUpdateCoordinator` subclass or cross-platform entity base; [sensor.py](../custom_components/ha_power_bill_au/sensor.py) is the only platform. The rule does not require inventing either abstraction. |
+| `config-flow` | Done | [config_flow.py](../custom_components/ha_power_bill_au/config_flow.py) provides selector-based UI setup and options. Every field has help text. Meter references and persistent source identities stay in `data`; adjustable tariffs, labels and tracked-meter selections are stored in `options`. The minor-version 1.3 migration preserves existing option precedence, identity and saved usage; [migration tests](../tests/test_bronze.py) verify reload behavior. The provider field is a tariff-contract label supplied by the user because this helper has no external device name to retrieve. |
 | `config-flow-test-coverage` | Done | [Flow tests](../tests/test_config_flow.py) measure 100% statement and branch coverage of `config_flow.py`, including all user and options paths. Invalid form submissions are corrected and the same flow finishes; created entries assert unique IDs. Unsupported feed-in configurations abort with guidance rather than presenting an error that cannot be fixed in that form. CI enforces full coverage. |
-| `dependency-transparency` | Exempt | [manifest.json](../custom_components/power_bill/manifest.json) declares an empty external Python `requirements` list. The recorder dependency is a Home Assistant integration, not an independently distributed Python requirement. |
+| `dependency-transparency` | Exempt | [manifest.json](../custom_components/ha_power_bill_au/manifest.json) declares an empty external Python `requirements` list. The recorder dependency is a Home Assistant integration, not an independently distributed Python requirement. |
 | `docs-actions` | Exempt | No integration-specific actions are provided. Standard sensor actions do not require custom action documentation. |
 | `docs-conditions` | Exempt | No integration-specific conditions are provided. |
 | `docs-high-level-description` | Exempt | The rule exempts helpers that do not connect to an external device or service. The [README introduction](../README.md) still describes the tariff calculations, energy sensors, recorder data and supported billing features. |
 | `docs-installation-instructions` | Todo | The [README](../README.md#installation) supplies HACS/manual steps, the minimum Core version, recorder prerequisites and supported cumulative meters; its configuration section walks through setup. The strict supplied rule requires a page on `home-assistant.io`. The [prepared upstream page](upstream/) still needs upstream review and publication. |
 | `docs-removal-instructions` | Todo | The [README](../README.md#removal) explains removing entries, deletion of local usage/demand data, removing files and restarting. The strict supplied rule requires publication on `home-assistant.io`; the [prepared upstream page](upstream/) has not fulfilled that external step. |
 | `docs-triggers` | Exempt | No integration-specific triggers are provided. Users can use Home Assistant's standard sensor triggers. |
-| `entity-event-setup` | Done | [TariffSensor](../custom_components/power_bill/sensor.py) connects the dispatcher callback in `async_added_to_hass` and registers its unsubscribe function with `async_on_remove`. The runtime owns its source listeners and cancels them during entry unload. |
-| `entity-unique-id` | Done | Each sensor uses its config-entry ID plus a stable description key. [sources.py](../custom_components/power_bill/sources.py) binds registered meters to their registry identity and persists their original child-sensor and ledger keys. Source renames retain entity customizations, pending usage and totals, including across unload/reload. A different meter reusing the old entity ID receives fresh keys. Existing band keys persist across dated plans; the supported UI adds new bands rather than renaming an existing band in place. |
+| `entity-event-setup` | Done | [TariffSensor](../custom_components/ha_power_bill_au/sensor.py) connects the dispatcher callback in `async_added_to_hass` and registers its unsubscribe function with `async_on_remove`. The runtime owns its source listeners and cancels them during entry unload. |
+| `entity-unique-id` | Done | Each sensor uses its config-entry ID plus a stable description key. [sources.py](../custom_components/ha_power_bill_au/sources.py) binds registered meters to their registry identity and persists their original child-sensor and ledger keys. Source renames retain entity customizations, pending usage and totals, including across unload/reload. A different meter reusing the old entity ID receives fresh keys. Existing band keys persist across dated plans; the supported UI adds new bands rather than renaming an existing band in place. |
 | `has-entity-name` | Done | `TariffSensor._attr_has_entity_name = True`. The contract is represented by device information, and each sensor name describes its measurement. |
-| `runtime-data` | Done | [__init__.py](../custom_components/power_bill/__init__.py) defines `TariffConfigEntry = ConfigEntry[TariffRuntime]` and assigns the runtime to `entry.runtime_data`. The platform and diagnostics use that typed entry. There is no integration-owned `hass.data[DOMAIN]` store. |
+| `runtime-data` | Done | [__init__.py](../custom_components/ha_power_bill_au/__init__.py) defines `TariffConfigEntry = ConfigEntry[TariffRuntime]` and assigns the runtime to `entry.runtime_data`. The platform and diagnostics use that typed entry. There is no integration-owned `hass.data[DOMAIN]` store. |
 | `test-before-configure` | Exempt | The supplied rule explicitly exempts calculated helpers without a device/service connection. Local meter metadata and tariff inputs are still validated before an entry is created. |
 | `test-before-setup` | Done | Setup validates the tariff timeline, loads stored data and initializes recorder history. Invalid tariff configuration raises `ConfigEntryError`; temporary recorder/storage failures raise `ConfigEntryNotReady`. Cleanup runs after failed startup. No external authentication exists to test. |
 | `unique-config-entry` | Done | The user flow compares registered import/export identities at the beginning and end of setup, preventing duplicates even after a source rename. Existing contract IDs remain unchanged; new contracts receive a disambiguated ID if a different meter reuses an old textual ID. Unregistered sources use their configured entity references and can bind to registry identity later without replacing their sensors. Multiple distinct contracts remain supported. |
@@ -48,7 +48,7 @@ Run checks in an isolated environment containing [requirements_dev.txt](../requi
 ```sh
 python -m ruff check custom_components tests tools
 python -m ruff format --check custom_components tests tools
-python -m coverage run --branch --source=custom_components.power_bill.config_flow -m pytest --junitxml=test-results/pytest.xml
+python -m coverage run --branch --source=custom_components.ha_power_bill_au.config_flow -m pytest --junitxml=test-results/pytest.xml
 python -m coverage report --show-missing --fail-under=100
 python -m coverage xml -o test-results/coverage.xml
 ```
@@ -78,9 +78,9 @@ establish that either remote validator passed.
 
 ## Upstream requirements
 
-1. Submit the prepared Power Bill assets to the appropriate domain directory in
+1. Submit the prepared HA Power Bill AU assets to the appropriate domain directory in
    [home-assistant/brands](https://github.com/home-assistant/brands). For a Core
-   integration, the supplied rule specifies `core_integrations/power_bill/`.
+   integration, the supplied rule specifies `core_integrations/ha_power_bill_au/`.
    Verify review and merge before changing `brands` to `done`.
 2. Submit the prepared integration page to
    [home-assistant/home-assistant.io](https://github.com/home-assistant/home-assistant.io)

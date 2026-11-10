@@ -18,13 +18,13 @@ from homeassistant.data_entry_flow import FlowResultType, InvalidData
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant.common import MockConfigEntry
 
-from custom_components.power_bill.config_flow import (
+from custom_components.ha_power_bill_au.config_flow import (
     _band_error,
     _TariffStepsMixin,
     _valid_amounts,
 )
-from custom_components.power_bill.const import CONF_SOURCES, DOMAIN
-from custom_components.power_bill.sources import meter_pair, prepare_sources
+from custom_components.ha_power_bill_au.const import CONF_SOURCES, DOMAIN
+from custom_components.ha_power_bill_au.sources import meter_pair, prepare_sources
 
 IMPORT = "sensor.flow_import"
 EXPORT = "sensor.flow_export"
@@ -47,10 +47,10 @@ def _inputs(recorder_mock, enable_custom_integrations, hass, monkeypatch):
     for entity in (IMPORT, EXPORT, DEVICE):
         hass.states.async_set(entity, "100", ATTRS)
     monkeypatch.setattr(
-        "custom_components.power_bill.async_setup_entry", AsyncMock(return_value=True)
+        "custom_components.ha_power_bill_au.async_setup_entry", AsyncMock(return_value=True)
     )
     monkeypatch.setattr(
-        "custom_components.power_bill.async_unload_entry", AsyncMock(return_value=True)
+        "custom_components.ha_power_bill_au.async_unload_entry", AsyncMock(return_value=True)
     )
 
 

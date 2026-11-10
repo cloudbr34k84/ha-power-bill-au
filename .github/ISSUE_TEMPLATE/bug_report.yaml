@@ -2,13 +2,13 @@
 # https://github.com/tonylofgren/aurora-smart-home
 
 name: Bug report
-description: Report a problem with Power Bill.
+description: Report a problem with HA Power Bill AU.
 title: "[Bug]: "
 body:
   - type: input
     id: integration_version
     attributes:
-      label: Power Bill version
+      label: HA Power Bill AU version
       placeholder: "0.1.0"
     validations:
       required: true
