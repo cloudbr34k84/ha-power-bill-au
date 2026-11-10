@@ -3,8 +3,8 @@
 import argparse
 import json
 import os
-from pathlib import Path
 import re
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -19,7 +19,9 @@ def main() -> None:
         raise SystemExit("Run releases on a version tag, not a branch")
     if not re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag):
         raise SystemExit("Expected a stable semantic version tag such as v0.2.1")
-    manifest = json.loads((ROOT / "custom_components/ha_power_bill_au/manifest.json").read_text())
+    manifest = json.loads(
+        (ROOT / "custom_components/ha_power_bill_au/manifest.json").read_text()
+    )
     if tag != f"v{manifest['version']}":
         raise SystemExit("Release tag does not match manifest version")
     changelog = (ROOT / "CHANGELOG.md").read_text()
