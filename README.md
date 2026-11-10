@@ -243,8 +243,8 @@ The integration folder and manifest domain must both remain `ha_power_bill_au`.
 
 ### Release versions
 
-The current manifest version is `0.2.2` in
-`custom_components/ha_power_bill_au/manifest.json`. The matching release tag is `v0.2.2`; the manifest value has no `v` prefix.
+The current manifest version is `0.2.3` in
+`custom_components/ha_power_bill_au/manifest.json`. The matching release tag is `v0.2.3`; the manifest value has no `v` prefix.
 For later releases, update the manifest and [CHANGELOG.md](CHANGELOG.md) before tagging:
 `0.1.1` for a patch, `0.2.0` for a feature release during initial development, and `1.0.0`
 for the first stable release. Never reuse a published version number.

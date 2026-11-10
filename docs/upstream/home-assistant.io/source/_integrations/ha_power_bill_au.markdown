@@ -3,7 +3,6 @@ title: HA Power Bill AU
 description: Calculate electricity costs and feed-in credits from your Home Assistant energy meters and tariff plans.
 ha_category:
   - Energy
-  - Helper
   - Sensor
 ha_iot_class: Calculated
 ha_config_flow: true
@@ -13,7 +12,7 @@ ha_domain: ha_power_bill_au
 ha_platforms:
   - diagnostics
   - sensor
-ha_integration_type: helper
+ha_integration_type: service
 ---
 
 The **HA Power Bill AU** {% term integration %} calculates electricity costs from energy
