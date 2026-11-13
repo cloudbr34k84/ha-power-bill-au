@@ -439,5 +439,47 @@ async def test_daily_only_device_history_uses_the_days_grid_share(hass, monkeypa
 
     monkeypatch.setattr(STATS, stats)
     entry = await _setup(hass)
+    runtime = entry.runtime_data
     # 4 kWh imported of an 8 kWh day: the car pays half of its 2 kWh.
-    assert _cost(entry.runtime_data, EV) == pytest.approx(RATE)
+    assert _cost(runtime, EV) == pytest.approx(RATE)
+    # The other 6 kWh of the house pay the rest of the day's import.
+    assert _cost(runtime, UNTRACKED_KEY) == pytest.approx(3 * RATE)
+    assert _reconciles(runtime)
+
+
+async def test_cost_sensors_are_named_after_the_meters_device(hass):
+    """A renamed meter entity must not replace the device name in the cost sensors."""
+    from homeassistant.helpers import device_registry as dr
+    from homeassistant.helpers import entity_registry as er
+
+    meter_entry = MockConfigEntry(domain="mqtt")
+    meter_entry.add_to_hass(hass)
+    device = dr.async_get(hass).async_get_or_create(
+        config_entry_id=meter_entry.entry_id,
+        identifiers={("mqtt", "clamp")},
+        name="Izone Circuit EM Clamp",
+    )
+    hass.states.async_remove(EV)  # Let the registry hand out this entity ID.
+    registry = er.async_get(hass)
+    meter = registry.async_get_or_create(
+        "sensor",
+        "mqtt",
+        "clamp_energy",
+        config_entry=meter_entry,
+        device_id=device.id,
+        has_entity_name=True,
+        original_name="Energy",
+        suggested_object_id="solar_ev",
+    )
+    assert meter.entity_id == EV
+    registry.async_update_entity(EV, name="Total Energy Consumed")
+    hass.states.async_set(EV, "10", {**ATTRS, "friendly_name": "Total Energy Consumed"})
+
+    await _setup(hass, solar=False)
+    names = [
+        state.attributes.get("friendly_name")
+        for state in hass.states.async_all("sensor")
+        if state.entity_id.startswith("sensor.solar_") and "cost" in state.entity_id
+    ]
+    assert "Solar Izone Circuit EM Clamp Energy cost total" in names
+    assert not [name for name in names if "Total Energy Consumed" in name]

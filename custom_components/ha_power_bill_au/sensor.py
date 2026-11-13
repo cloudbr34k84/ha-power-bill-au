@@ -18,6 +18,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo
@@ -107,6 +108,25 @@ def _kwh(
         suggested_display_precision=2,
         value_fn=fn,
         source=source,
+    )
+
+
+def _device_label(hass: HomeAssistant, entity_id: str) -> str | None:
+    """The meter's default name: its device's name plus the sensor's own name.
+
+    A rename of the meter entity (for example "Total Energy Consumed") would otherwise
+    replace the device name in every cost sensor built from it. A name given to the
+    device is kept. Meters without a device keep their display name.
+    """
+    entry = er.async_get(hass).async_get(entity_id)
+    if entry is None or entry.device_id is None or not entry.has_entity_name:
+        return None
+    device = dr.async_get(hass).async_get(entry.device_id)
+    device_name = device and (device.name_by_user or device.name)
+    if not device_name:
+        return None
+    return (
+        f"{device_name} {entry.original_name}" if entry.original_name else device_name
     )
 
 
@@ -235,7 +255,11 @@ def _descriptions(rt: TariffRuntime) -> list[TariffSensorDescription]:
         slug = device.split(".", 1)[-1]
         state = rt.hass.states.get(device)
         friendly = state.attributes.get("friendly_name") if state else None
-        label = friendly or slug.replace("_", " ").capitalize()
+        label = (
+            _device_label(rt.hass, device)
+            or friendly
+            or slug.replace("_", " ").capitalize()
+        )
         key = rt.device_sensor_key(device)
         descriptions += [
             _money(

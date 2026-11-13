@@ -603,33 +603,51 @@ class TariffRuntime:
         def value(table: dict[Any, tuple[datetime, float]], at: Any) -> float:
             return table[at][1] if at in table else 0.0
 
+        def day_share(day: date) -> float:
+            if day not in imp_d:
+                return 1.0  # No import reading for this day: assume the grid paid.
+            return solar_split(
+                imp_d[day], exp_d.get(day, 0.0), sol_d.get(day, 0.0), 0.0
+            )[0]
+
+        # Days the import meter only has a daily total for are split per day.
+        daily_only = set(imp_d) - {when.date() for when, _kwh in imp_h.values()}
+        device_days: dict[date, list[float]] = {}  # day -> [kWh, cost]
+
+        def note_day(day: date, kwh: float, cost: float) -> None:
+            if day in daily_only:
+                cell = device_days.setdefault(day, [0.0, 0.0])
+                cell[0] += kwh
+                cell[1] += cost
+
         device_hours: dict[datetime, float] = {}
         for key, (hour_rows, day_rows, pricer) in deferred.items():
             for when, kwh in hour_rows:
                 at = when.astimezone(dt_util.UTC)
                 if at >= start:
                     continue  # Priced live from the buffer.
-                grid = 1.0  # No import reading for this hour: assume the grid paid.
                 if at in imp_h:
                     grid = solar_split(
                         imp_h[at][1], value(exp_h, at), value(sol_h, at), 0.0
                     )[0]
+                elif when.date() in daily_only:
+                    grid = day_share(when.date())
+                else:
+                    grid = 1.0  # No import reading for this hour: assume the grid paid.
                 band, price = pricer(when)
                 self.ledger.add_energy(key, when.date(), band, kwh, price * grid)
                 device_hours[at] = device_hours.get(at, 0.0) + kwh
+                note_day(when.date(), kwh, kwh * price * grid)
             for day_start, kwh in day_rows:
                 if day_start.astimezone(dt_util.UTC) >= start:
                     continue
                 day = day_start.date()
-                grid = 1.0
-                if day in imp_d:
-                    grid = solar_split(
-                        imp_d[day], exp_d.get(day, 0.0), sol_d.get(day, 0.0), 0.0
-                    )[0]
+                grid = day_share(day)
                 band, price = pricer(day_start.replace(hour=12))
                 self.ledger.add_energy(key, day, band, kwh, price * grid)
+                note_day(day, kwh, kwh * price * grid)
 
-        if restored or not imp_h:
+        if restored or not (imp_h or imp_d):
             # The untracked rest can't be rebuilt without every device's hourly usage:
             # keep what was booked live, and continue live from the same point.
             self._settle_from[UNTRACKED_KEY] = restored_from
@@ -653,6 +671,20 @@ class TariffRuntime:
                 self.ledger.add_energy(
                     UNTRACKED_KEY, when.date(), band, rest, price * grid
                 )
+        for day in daily_only:
+            noon = dt_util.start_of_local_day(day).replace(hour=12)
+            if noon.astimezone(dt_util.UTC) >= start:
+                continue
+            devices_kwh, devices_cost = device_days.get(day, [0.0, 0.0])
+            _grid, rest = solar_split(
+                imp_d[day], exp_d.get(day, 0.0), sol_d.get(day, 0.0), devices_kwh
+            )
+            if rest > 0:
+                # The import on this day was priced at the noon rate: untracked gets
+                # what is left of that after the devices.
+                band, price = self._import_price(noon)
+                cost = max(imp_d[day] * price - devices_cost, 0.0)
+                self.ledger.add_energy(UNTRACKED_KEY, day, band, rest, cost / rest)
 
     def _settle(self, now: datetime) -> bool:
         """Price device and untracked usage of every finished hour.
