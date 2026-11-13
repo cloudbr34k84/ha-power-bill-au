@@ -6,6 +6,8 @@ https://github.com/tonylofgren/aurora-smart-home
 
 from __future__ import annotations
 
+from typing import Any
+
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Event, HomeAssistant, callback
@@ -21,6 +23,7 @@ from homeassistant.helpers.storage import Store
 from sqlalchemy.exc import SQLAlchemyError
 
 from .const import (
+    CONF_DEVICE_DISTANCE,
     CONF_DEVICE_MODES,
     CONF_EXPORT_ENTITY,
     CONF_IMPORT_ENTITY,
@@ -106,23 +109,38 @@ def _async_track_sources(hass: HomeAssistant, entry: TariffConfigEntry) -> None:
             registered := er.async_get(hass).async_get(event.data["entity_id"])
         ):
             # Keep the stored entity ID current, for when the registry entry is gone.
-            links = {
-                key: (
-                    {**link, "entity_id": registered.entity_id}
-                    if isinstance(link, dict)
-                    and link.get("registry_id") == registered.id
-                    else link
-                )
-                for key, link in entry.options.get(CONF_DEVICE_MODES, {}).items()
-            }
-            hass.config_entries.async_update_entry(
-                entry, options={**entry.options, CONF_DEVICE_MODES: links}
-            )
+
+            def follow(link: Any) -> Any:
+                if isinstance(link, dict) and link.get("registry_id") == registered.id:
+                    return {**link, "entity_id": registered.entity_id}
+                return link
+
+            options = dict(entry.options)
+            if CONF_DEVICE_MODES in options:
+                options[CONF_DEVICE_MODES] = {
+                    key: follow(link)
+                    for key, link in options[CONF_DEVICE_MODES].items()
+                }
+            if CONF_DEVICE_DISTANCE in options:
+                options[CONF_DEVICE_DISTANCE] = {
+                    key: (
+                        {role: follow(target) for role, target in roles.items()}
+                        if isinstance(roles, dict)
+                        else roles
+                    )
+                    for key, roles in options[CONF_DEVICE_DISTANCE].items()
+                }
+            hass.config_entries.async_update_entry(entry, options=options)
         if renamed or event.data["action"] != "update":
             hass.config_entries.async_schedule_reload(entry.entry_id)
 
     mode_entities = sorted(
         {mode for _key, mode in entry.runtime_data.mode_links().values()}
+        | {
+            linked
+            for _key, roles in entry.runtime_data.distance_links().values()
+            for linked in roles.values()
+        }
     )
     if mode_entities:
         entry.async_on_unload(

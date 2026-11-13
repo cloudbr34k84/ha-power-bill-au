@@ -127,6 +127,7 @@ Tracked devices:
 - **Peak demand this month**: The demand being charged, with estimated and billed values in attributes when a demand charge is configured.
 - **Tracked-device costs**: Today, month-to-date and lifetime costs for each additional meter. With a solar production sensor configured, each device is priced at the share of each interval's usage that came from the grid.
 - **Cost and energy per mode**: For a tracked meter linked to a mode entity (a climate, water heater or select), the cost and energy used in each mode today, month to date and in total.
+- **Distance, charging cost per 100 km and energy per 100 km**: For a tracked charger linked to an electric car's odometer, month to date and in total, with the share of charging done away from home when the car's location and battery level are linked.
 - **Untracked usage cost**: With solar pricing on, the cost of everything the tracked devices don't account for, so the parts add up to the grid import cost.
 
 ## Data updates

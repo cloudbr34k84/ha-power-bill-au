@@ -868,6 +868,134 @@ async def test_mode_links_are_kept_per_device_under_its_ledger_key(hass):
     assert "device_modes" not in entry.options
 
 
+async def test_a_charger_is_linked_to_a_car_and_unlinked(hass):
+    km = {"unit_of_measurement": "km", "device_class": "distance"}
+    hass.states.async_set("sensor.flow_odometer", "1000", km)
+    hass.states.async_set("sensor.flow_offline_odometer", "unavailable", km)
+    hass.states.async_set("sensor.flow_battery", "55", {"unit_of_measurement": "%"})
+    hass.states.async_set("device_tracker.flow_car", "home")
+    hass.states.async_set("person.flow", "home")
+    registry = er.async_get(hass)
+    tracker = registry.async_get_or_create(
+        "device_tracker", "test", "car", suggested_object_id="flow_registered_car"
+    )
+    hass.states.async_set(tracker.entity_id, "home")
+    entry = await _entry(hass)
+    options = copy.deepcopy(dict(entry.options))
+
+    result = await _options(hass, entry, "distance")
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"device": DEVICE}
+    )
+    assert result["step_id"] == "distance_entities"
+    for bad, field, error in (
+        ({"odometer": IMPORT}, "odometer", "invalid_odometer"),
+        ({"odometer": "sensor.missing"}, "odometer", "invalid_odometer"),
+        (
+            {"odometer": "sensor.flow_odometer", "location": "person.missing"},
+            "location",
+            "invalid_location",
+        ),
+        (
+            {"odometer": "sensor.flow_odometer", "location": "sensor.flow_battery"},
+            "location",
+            "invalid_location",
+        ),
+        (
+            {"odometer": "sensor.flow_odometer", "battery": "sensor.missing"},
+            "battery",
+            "invalid_battery",
+        ),
+        (
+            {"odometer": "sensor.flow_odometer", "battery": IMPORT},
+            "battery",
+            "invalid_battery",
+        ),
+    ):
+        manager = hass.config_entries.options
+        try:
+            checked = await manager.async_configure(result["flow_id"], bad)
+        except InvalidData:  # Rejected by the selector: check the step's own guard.
+            flow = manager._progress[result["flow_id"]]
+            checked = await flow.async_step_distance_entities(bad)
+        assert checked["errors"] == {field: error}
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            "odometer": "sensor.flow_odometer",
+            "location": tracker.entity_id,
+            "battery": "sensor.flow_battery",
+        },
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options == {
+        **options,
+        "device_distance": {
+            DEVICE: {
+                "odometer": {"entity_id": "sensor.flow_odometer", "registry_id": None},
+                "location": {"entity_id": tracker.entity_id, "registry_id": tracker.id},
+                "battery": {"entity_id": "sensor.flow_battery", "registry_id": None},
+            }
+        },
+    }
+
+    # The form shows the current link (followed through a rename), and an odometer
+    # that is offline right now can still be chosen.
+    registry.async_update_entity(
+        tracker.entity_id, new_entity_id="device_tracker.flow_i4"
+    )
+    hass.states.async_set("device_tracker.flow_i4", "home")
+    result = await _options(hass, entry, "distance")
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"device": DEVICE}
+    )
+    suggested = {
+        str(key): key.description["suggested_value"]
+        for key in result["data_schema"].schema
+    }
+    assert suggested == {
+        "odometer": "sensor.flow_odometer",
+        "location": "device_tracker.flow_i4",
+        "battery": "sensor.flow_battery",
+    }
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {"odometer": "sensor.flow_offline_odometer", "location": "person.flow"},
+    )
+    assert entry.options["device_distance"][DEVICE] == {
+        "odometer": {"entity_id": "sensor.flow_offline_odometer", "registry_id": None},
+        "location": {"entity_id": "person.flow", "registry_id": None},
+    }
+
+    result = await _options(hass, entry, "distance")
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"device": DEVICE}
+    )
+    await hass.config_entries.options.async_configure(result["flow_id"], {})
+    assert entry.options == options
+
+
+async def test_distance_needs_a_tracked_device_and_untracking_drops_the_link(hass):
+    hass.states.async_set("sensor.flow_odometer", "1", {"unit_of_measurement": "km"})
+    entry = await _entry(hass)
+    result = await _options(hass, entry, "distance")
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"device": DEVICE}
+    )
+    await hass.config_entries.options.async_configure(
+        result["flow_id"], {"odometer": "sensor.flow_odometer"}
+    )
+    assert DEVICE in entry.options["device_distance"]
+    result = await _options(hass, entry, "devices")
+    await hass.config_entries.options.async_configure(
+        result["flow_id"], {"tracked_devices": []}
+    )
+    assert "device_distance" not in entry.options
+    result = await _options(hass, entry, "distance")
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "no_tracked_devices"
+
+
 async def test_modes_need_a_tracked_device(hass):
     entry = await _entry(hass)
     hass.config_entries.async_update_entry(

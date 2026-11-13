@@ -29,6 +29,7 @@ from . import TariffConfigEntry
 from .const import (
     CONF_DAILY_MEMBERSHIP,
     CONF_DAILY_SUPPLY,
+    CONF_DEVICE_DISTANCE,
     CONF_DEVICE_MODES,
     CONF_EXPORT_BANDS,
     CONF_EXPORT_ENTITY,
@@ -43,6 +44,7 @@ from .const import (
     DOMAIN,
     provider_name,
 )
+from .distance import battery_level, odometer_km
 from .energy_dashboard import ADD, BLOCKED, DONE, async_plan, async_save
 from .engine import Band, validate_bands
 from .sources import meter_pair, prepare_sources, source_record
@@ -392,8 +394,143 @@ class EnergyTariffCostOptionsFlow(_TariffStepsMixin, OptionsFlowWithReload):
                 "devices",
                 "solar",
                 "modes",
+                "distance",
                 "energy_dashboard",
             ],
+        )
+
+    def _device_choice(self, step_id: str) -> ConfigFlowResult:
+        """A form choosing one tracked device, or an abort when there is none."""
+        _data, options = prepare_sources(
+            self.hass, self.config_entry.data, self.config_entry.options
+        )
+        devices = list(options.get(CONF_TRACKED_DEVICES) or [])
+        if not devices:
+            return self.async_abort(reason="no_tracked_devices")
+        return self.async_show_form(
+            step_id=step_id,
+            data_schema=vol.Schema(
+                {
+                    vol.Required("device", default=devices[0]): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                selector.SelectOptionDict(
+                                    value=entity_id,
+                                    label=_display_name(self.hass, entity_id),
+                                )
+                                for entity_id in devices
+                            ],
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    )
+                }
+            ),
+        )
+
+    async def async_step_distance(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Choose the tracked charger to link to a car's odometer."""
+        if user_input is not None:
+            self._distance_device = user_input["device"]
+            return await self.async_step_distance_entities()
+        return self._device_choice("distance")
+
+    async def async_step_distance_entities(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Link the charger to an odometer (and optionally location and battery level)."""
+        data, _options = prepare_sources(
+            self.hass, self.config_entry.data, self.config_entry.options
+        )
+        ledger_key = source_record(data, self._distance_device)["ledger_key"]
+        links = dict(self.config_entry.options.get(CONF_DEVICE_DISTANCE) or {})
+        registry = er.async_get(self.hass)
+        current: dict[str, str | None] = {}
+        for role in ("odometer", "location", "battery"):
+            target = links.get(ledger_key, {}).get(role) or {}
+            entity_id = target.get("entity_id")
+            if (registry_id := target.get("registry_id")) and (
+                registered := registry.async_get(registry_id)
+            ):
+                entity_id = registered.entity_id
+            current[role] = entity_id
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            odometer = user_input.get("odometer") or None
+            location = user_input.get("location") or None
+            battery = user_input.get("battery") or None
+            if odometer is None:
+                links.pop(ledger_key, None)
+            else:
+                state = self.hass.states.get(odometer)
+                if state is None or (
+                    odometer_km(state) is None
+                    and state.state not in ("unavailable", "unknown")
+                ):
+                    errors["odometer"] = "invalid_odometer"
+                if location is not None and (
+                    location.split(".", 1)[0] not in ("device_tracker", "person")
+                    or self.hass.states.get(location) is None
+                ):
+                    errors["location"] = "invalid_location"
+                if battery is not None and (
+                    (battery_state := self.hass.states.get(battery)) is None
+                    or (
+                        battery_level(battery_state) is None
+                        and battery_state.state not in ("unavailable", "unknown")
+                    )
+                ):
+                    errors["battery"] = "invalid_battery"
+                if not errors:
+
+                    def link(entity_id: str) -> dict[str, str | None]:
+                        registered = registry.async_get(entity_id)
+                        return {
+                            "entity_id": entity_id,
+                            "registry_id": registered.id if registered else None,
+                        }
+
+                    links[ledger_key] = {"odometer": link(odometer)}
+                    if location is not None:
+                        links[ledger_key]["location"] = link(location)
+                    if battery is not None:
+                        links[ledger_key]["battery"] = link(battery)
+            if not errors:
+                new = self._options_data()
+                new.pop(CONF_DEVICE_DISTANCE, None)
+                if links:
+                    new[CONF_DEVICE_DISTANCE] = links
+                return self.async_create_entry(title="", data=new)
+        return self.async_show_form(
+            step_id="distance_entities",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        "odometer", description={"suggested_value": current["odometer"]}
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(
+                            domain="sensor", device_class="distance"
+                        )
+                    ),
+                    vol.Optional(
+                        "location", description={"suggested_value": current["location"]}
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(
+                            domain=["device_tracker", "person"]
+                        )
+                    ),
+                    vol.Optional(
+                        "battery", description={"suggested_value": current["battery"]}
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(domain="sensor")
+                    ),
+                }
+            ),
+            description_placeholders={
+                "device": _display_name(self.hass, self._distance_device)
+            },
+            errors=errors,
         )
 
     async def async_step_modes(
@@ -599,14 +736,15 @@ class EnergyTariffCostOptionsFlow(_TariffStepsMixin, OptionsFlowWithReload):
             tracked = {
                 source_record(entry_data, device)["ledger_key"] for device in devices
             }
-            links = {
-                key: link
-                for key, link in data.get(CONF_DEVICE_MODES, {}).items()
-                if key in tracked
-            }
-            data.pop(CONF_DEVICE_MODES, None)
-            if links:
-                data[CONF_DEVICE_MODES] = links
+            for option in (CONF_DEVICE_MODES, CONF_DEVICE_DISTANCE):
+                links = {
+                    key: link
+                    for key, link in data.get(option, {}).items()
+                    if key in tracked
+                }
+                data.pop(option, None)
+                if links:
+                    data[option] = links
         return data
 
     async def async_step_devices(

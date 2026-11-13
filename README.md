@@ -103,6 +103,28 @@ Cool cost month to date". A climate entity's `heat_cool` is shown as Heat/Cool.
   it is seen. They stay when the mode entity is temporarily missing, for example while its
   integration is still loading.
 
+### Charging cost per 100 km
+
+Link an electric car's tracked charger meter to the car's odometer in **Configure >
+Distance**. You get, for the month to date and in total:
+
+- **Distance** driven, from the odometer (km or miles; shown in km).
+- **Charging cost per 100 km**: the charger's cost (with solar pricing, what the charging
+  took from the grid) divided by the kilometres driven.
+- **Energy per 100 km**: the charger's energy, measured at the wall, so it includes
+  charging losses.
+
+The figures start where the odometer's recorder statistics start, and the charger's cost
+is counted from the same day, so both cover the same days. Before the car has driven a
+kilometre in a period, the per-100 km sensors are unknown.
+
+Kilometres driven on charging somewhere else (public or work charging) are counted, but
+that charging's cost is not, so the cost per 100 km reads low when much of the charging
+happens away from home. Add the car's location (a device tracker or person) and battery
+level and the per-100 km sensors show `away_charging_percent`: the share of battery
+charge added while the car was not home. Linking fills in the last seven days of it from
+the recorder.
+
 ### Using it in the Energy dashboard
 
 In **Settings > Dashboards > Energy > Grid**, pick these two sensors. Only the lifetime
@@ -180,6 +202,8 @@ Settings → Devices & Services → HA Power Bill AU → Configure:
   new plan. Earlier usage keeps the plan it was recorded under.
 - **Demand charge** if your plan charges for your highest kW each month.
 - **Stepped feed-in** if your solar feed-in tariff pays a higher rate for the first kWh each day.
+- **Distance** to divide an electric car charger's cost and energy by the kilometres
+  driven. See [Charging cost per 100 km](#charging-cost-per-100-km).
 - **Modes** to split a tracked device's cost by mode. See [Cost per mode](#cost-per-mode).
 - **Solar** to price tracked devices by what they took from the grid. See
   [What your devices really cost](#what-your-devices-really-cost-solar).
@@ -267,6 +291,9 @@ two rates and the number of kWh per day that step 1 covers. If your bill has one
   offline, devices fall back to the full import rate until you select it again.
 - Cost per mode follows the mode entity's state only. A climate entity in Auto is not split
   into heating and cooling, and a mode change takes effect with the next meter reading.
+- Cost per 100 km only counts home charging through the linked meter. The away-charging
+  share is worked out from rises in the battery level (of at least one percentage point)
+  and where the car was at the time; it is not used to correct the figure.
 - A battery is not modelled: its charging and discharging would need to be in the balance.
 
 ## Removal
@@ -317,6 +344,7 @@ ha-power-bill-au/
 │       ├── config_flow.py
 │       ├── const.py
 │       ├── diagnostics.py
+│       ├── distance.py
 │       ├── energy_dashboard.py
 │       ├── modes.py
 │       ├── engine.py
@@ -338,8 +366,8 @@ The integration folder and manifest domain must both remain `ha_power_bill_au`.
 
 ### Release versions
 
-The current manifest version is `0.4.0` in
-`custom_components/ha_power_bill_au/manifest.json`. The matching release tag is `v0.4.0`; the manifest value has no `v` prefix.
+The current manifest version is `0.5.0` in
+`custom_components/ha_power_bill_au/manifest.json`. The matching release tag is `v0.5.0`; the manifest value has no `v` prefix.
 For later releases, update the manifest and [CHANGELOG.md](CHANGELOG.md) before tagging:
 `0.1.1` for a patch, `0.2.0` for a feature release during initial development, and `1.0.0`
 for the first stable release. Never reuse a published version number.

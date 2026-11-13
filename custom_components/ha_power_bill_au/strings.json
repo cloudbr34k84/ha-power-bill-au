@@ -214,7 +214,8 @@
           "devices": "Tracked devices (extra cost sensors)",
           "energy_dashboard": "Add to the Energy dashboard",
           "solar": "Solar (price devices by what they took from the grid)",
-          "modes": "Modes (cost per mode for a tracked device)"
+          "modes": "Modes (cost per mode for a tracked device)",
+          "distance": "Distance (charging cost per 100 km for an electric car)"
         }
       },
       "demand": {
@@ -324,6 +325,30 @@
         "data_description": {
           "mode_entity": "A climate, water heater or select entity whose state names the mode."
         }
+      },
+      "distance": {
+        "title": "Cost per 100 km",
+        "description": "Choose the tracked meter of an electric car's charger. Its cost and energy are divided by the kilometres the car drove.",
+        "data": {
+          "device": "Tracked charger"
+        },
+        "data_description": {
+          "device": "The tracked energy meter of the car charger."
+        }
+      },
+      "distance_entities": {
+        "title": "Car",
+        "description": "Link **{device}** to the car.\n\nKilometres are read from the odometer; the recorder's history is used, so the figures start with the odometer's data rather than today.\n\nWith the car's location and battery level, charging away from home is shown as `away_charging_percent`: kilometres driven on that charge are counted, but its cost is not, so the cost per 100 km reads low when it is high.\n\nLeave the odometer empty to unlink the car.",
+        "data": {
+          "odometer": "Odometer",
+          "location": "Car location (optional)",
+          "battery": "Battery level (optional)"
+        },
+        "data_description": {
+          "odometer": "The car's total distance (mileage) sensor, in km or miles.",
+          "location": "A device tracker or person that is \"home\" while the car is at home.",
+          "battery": "The car's battery level in percent."
+        }
       }
     },
     "error": {
@@ -341,7 +366,10 @@
       "invalid_amount": "Amounts must be finite numbers greater than or equal to zero.",
       "invalid_energy_sensor": "Choose a cumulative energy sensor in Wh, kWh or MWh with state class total or total_increasing. Use a different meter for each role.",
       "invalid_date": "Enter a valid date as YYYY-MM-DD.",
-      "invalid_mode_entity": "Choose an existing climate, water heater or select entity."
+      "invalid_mode_entity": "Choose an existing climate, water heater or select entity.",
+      "invalid_odometer": "Choose a distance sensor in km or miles.",
+      "invalid_location": "Choose a device tracker or person.",
+      "invalid_battery": "Choose a sensor showing the battery level in percent."
     },
     "abort": {
       "no_export_meter": "This plan has no feed-in band. Set up an export meter first.",

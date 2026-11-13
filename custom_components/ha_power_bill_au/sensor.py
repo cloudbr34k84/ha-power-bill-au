@@ -205,6 +205,76 @@ def _mode_descriptions(rt: TariffRuntime) -> list[TariffSensorDescription]:
     return out
 
 
+def _distance_descriptions(rt: TariffRuntime) -> list[TariffSensorDescription]:
+    """Distance, and charging cost and energy per 100 km, for a charger with an odometer."""
+    out: list[TariffSensorDescription] = []
+    for device, (key, _roles) in rt.distance_links().items():
+        base = _device_label(rt.hass, device)
+        if base is None:
+            state = rt.hass.states.get(device)
+            base = (state and state.attributes.get("friendly_name")) or (
+                device.split(".", 1)[-1].replace("_", " ").capitalize()
+            )
+        stem = rt.device_sensor_key(device)
+
+        def value(field: str, k: str = key) -> Callable[[TariffRuntime], Any]:
+            return lambda r: r.distance_values(k).get(field)
+
+        def attrs(
+            scope: str, k: str = key
+        ) -> Callable[[TariffRuntime], dict[str, Any]]:
+            def build(r: TariffRuntime) -> dict[str, Any]:
+                values = r.distance_values(k)
+                return {
+                    "pricing": r.device_pricing,
+                    "since": values.get("since"),
+                    "away_charging_percent": values.get(f"away_{scope}"),
+                }
+
+            return build
+
+        for scope, label in (("month", "month to date"), ("total", "total")):
+            out += [
+                TariffSensorDescription(
+                    key=f"{stem}_distance_{scope}",
+                    name=f"{base} distance {label}",
+                    native_unit_of_measurement="km",
+                    device_class=SensorDeviceClass.DISTANCE,
+                    state_class=(
+                        SensorStateClass.TOTAL_INCREASING
+                        if scope == "month"
+                        else SensorStateClass.TOTAL
+                    ),
+                    suggested_display_precision=0,
+                    value_fn=value(f"km_{scope}"),
+                    source=device,
+                ),
+                TariffSensorDescription(
+                    key=f"{stem}_cost_per_100km_{scope}",
+                    name=f"{base} charging cost per 100 km {label}",
+                    native_unit_of_measurement="AUD/100 km",
+                    state_class=SensorStateClass.MEASUREMENT,
+                    suggested_display_precision=2,
+                    icon="mdi:cash-marker",
+                    value_fn=value(f"cost_100_{scope}"),
+                    attrs_fn=attrs(scope),
+                    source=device,
+                ),
+                TariffSensorDescription(
+                    key=f"{stem}_energy_per_100km_{scope}",
+                    name=f"{base} energy per 100 km {label}",
+                    native_unit_of_measurement="kWh/100km",
+                    device_class=SensorDeviceClass.ENERGY_DISTANCE,
+                    state_class=SensorStateClass.MEASUREMENT,
+                    suggested_display_precision=1,
+                    value_fn=value(f"kwh_100_{scope}"),
+                    attrs_fn=attrs(scope),
+                    source=device,
+                ),
+            ]
+    return out
+
+
 def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
 
@@ -360,6 +430,7 @@ def _descriptions(rt: TariffRuntime) -> list[TariffSensorDescription]:
             ),
         ]
     descriptions += _mode_descriptions(rt)
+    descriptions += _distance_descriptions(rt)
     if rt.solar_mode:
         # Everything the tracked devices don't account for, so the parts add up
         # to the grid import cost.

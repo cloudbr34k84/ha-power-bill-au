@@ -244,6 +244,9 @@ class UsageLedger:
             month: {"kw": float(peak["kw"]), "at": str(peak["at"])}
             for month, peak in data.get("demand_peaks", {}).items()
         }
+        # source -> (copy source, start): bookings of a source from that moment on are
+        # also added to its copy. Set at runtime, never saved.
+        self.mirrors: dict[str, tuple[str, datetime]] = {}
         numbers = [*self.last_seen.values(), *self.fixed_days.values()]
         for cell in self.totals.values():
             numbers.extend(cell.values())
@@ -301,24 +304,40 @@ class UsageLedger:
         return changed
 
     def add_energy(
-        self, source: str, day: date, band: str, kwh: float, price: float
+        self,
+        source: str,
+        day: date,
+        band: str,
+        kwh: float,
+        price: float,
+        at: datetime | None = None,
     ) -> None:
-        """Add kWh that were priced at `price` per kWh (already GST-adjusted if needed)."""
+        """Add kWh that were priced at `price` per kWh (already GST-adjusted if needed).
+
+        `at` is when the energy was used (the start of its hour or day); without it the
+        booking counts as made at the end of `day`.
+        """
         if not all(math.isfinite(value) and value >= 0 for value in (kwh, price)):
             raise ValueError("invalid_amount")
         cost = kwh * price
         if not math.isfinite(cost):
             raise ValueError("invalid_amount")
-        cell = (
-            self.days.setdefault(source, {})
-            .setdefault(day.isoformat(), {})
-            .setdefault(band, _empty_cell())
-        )
-        cell["kwh"] += kwh
-        cell["cost"] += cost
-        total = self.totals.setdefault(source, _empty_cell())
-        total["kwh"] += kwh
-        total["cost"] += cost
+        targets = [source]
+        if mirror := self.mirrors.get(source):
+            target, start = mirror
+            if (at >= start) if at is not None else (day > start.date()):
+                targets.append(target)
+        for target in targets:
+            cell = (
+                self.days.setdefault(target, {})
+                .setdefault(day.isoformat(), {})
+                .setdefault(band, _empty_cell())
+            )
+            cell["kwh"] += kwh
+            cell["cost"] += cost
+            total = self.totals.setdefault(target, _empty_cell())
+            total["kwh"] += kwh
+            total["cost"] += cost
 
     def reading_delta(
         self, source: str, value: float, *, reset_on_decrease: bool = True
@@ -352,7 +371,7 @@ class UsageLedger:
         if delta <= 0:
             return 0.0
         band_name, price = pricer(when)
-        self.add_energy(source, when.date(), band_name, delta, price)
+        self.add_energy(source, when.date(), band_name, delta, price, when)
         return delta
 
     def ensure_fixed_through(
@@ -428,7 +447,7 @@ def book_hourly(
         if kwh <= 0:
             continue
         band_name, price = pricer(when)
-        ledger.add_energy(source, when.date(), band_name, kwh, price)
+        ledger.add_energy(source, when.date(), band_name, kwh, price, when)
         total += kwh
     return total
 

@@ -33,6 +33,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from .const import (
     CONF_DAILY_MEMBERSHIP,
     CONF_DAILY_SUPPLY,
+    CONF_DEVICE_DISTANCE,
     CONF_DEVICE_MODES,
     CONF_EXPORT_BANDS,
     CONF_EXPORT_ENTITY,
@@ -44,6 +45,15 @@ from .const import (
     CONF_TRACKED_DEVICES,
     signal_modes,
     signal_update,
+)
+from .distance import (
+    DISTANCE_PREFIX,
+    DistanceTracker,
+    accept_km,
+    at_home,
+    battery_level,
+    distance_key,
+    odometer_km,
 )
 from .engine import (
     FIXED_KEY,
@@ -112,6 +122,16 @@ def _statistics_result(result: Any) -> dict[str, list[dict[str, Any]]]:
         else:
             raise HomeAssistantError("Recorder returned invalid statistics rows")
     return normalized
+
+
+def _resolve_link(registry: er.EntityRegistry, link: dict[str, Any]) -> str | None:
+    """A linked entity's current ID, followed through renames by its registry ID."""
+    entity_id = link.get("entity_id")
+    if (registry_id := link.get("registry_id")) and (
+        registered := registry.async_get(registry_id)
+    ):
+        entity_id = registered.entity_id
+    return entity_id if isinstance(entity_id, str) else None
 
 
 def _mode_of(state: State | None) -> str | None:
@@ -267,6 +287,27 @@ class TariffRuntime:
                     for identity in (link.get("registry_id"), entity_id)
                     if identity
                 ]
+        # device ledger key -> {"odometer"|"location"|"battery": entity ID}
+        self._distance_links: dict[str, dict[str, str]] = {}
+        self._distance_identity: dict[str, str] = {}
+        for key, link in (cfg.get(CONF_DEVICE_DISTANCE) or {}).items():
+            if key not in self._device_keys or not isinstance(link, dict):
+                continue
+            roles: dict[str, str] = {}
+            for role in ("odometer", "location", "battery"):
+                if isinstance(target := link.get(role), dict) and (
+                    entity_id := _resolve_link(registry, target)
+                ):
+                    roles[role] = entity_id
+            if "odometer" in roles:
+                self._distance_links[key] = roles
+                odometer = link["odometer"]
+                self._distance_identity[key] = str(
+                    odometer.get("registry_id") or odometer.get("entity_id")
+                )
+        self.distance = DistanceTracker()
+        # Identities of odometers that replaced another one in this start.
+        self._distance_reset: set[str] = set()
         self.modes = ModeTracker()
         # Devices whose record was dropped because they were linked to another entity.
         self._modes_reset: set[str] = set()
@@ -295,6 +336,7 @@ class TariffRuntime:
         if isinstance(stored, dict):
             # Kept apart from the ledger: mode history can't be rebuilt if that is invalid.
             self.modes = ModeTracker.from_dict(stored.get("modes"))
+            self.distance = DistanceTracker.from_dict(stored.get("distance"))
             try:
                 if "history_start" in stored:
                     self._history_start = min(
@@ -329,6 +371,22 @@ class TariffRuntime:
                 self._modes_reset.add(key)
             self.modes.source[key] = identity
             self._note_mode_names(key, self.hass.states.get(self._mode_links[key]))
+        self.distance.keep_only(set(self._distance_links))
+        for key, identity in self._distance_identity.items():
+            point = self.distance.points.get(key)
+            if point is not None and point.get("source", identity) != identity:
+                self.distance.forget(key)  # A different odometer: start again.
+                self._distance_reset.add(identity)
+        if self._distance_links:
+            if "recorder" in self.hass.config.components:
+                await self._async_distance_history(now)
+                try:
+                    await self._async_backfill_charges(now)
+                except Exception:  # noqa: BLE001 - optional history must not stop setup
+                    _LOGGER.exception(
+                        "Could not work out past charging; tracking from now"
+                    )
+            self._start_distance(now)
         # The hour HA stopped in, however long ago: its live readings come first.
         self.modes.settle_loaded(now.astimezone(dt_util.UTC))
         recorder_ready = "recorder" in self.hass.config.components
@@ -344,8 +402,19 @@ class TariffRuntime:
             self._replay_pending()
         elif self._stored_ledger is not None:
             peaks = self.ledger.demand_peaks
+            mirrors = self.ledger.mirrors
             self.ledger = self._stored_ledger
             self.ledger.demand_peaks = peaks
+            self.ledger.mirrors = mirrors
+            # Charger costs per km of devices that are no longer linked to an odometer.
+            for table in (self.ledger.days, self.ledger.totals):
+                for source in [
+                    s
+                    for s in table
+                    if s.startswith(DISTANCE_PREFIX)
+                    and s[len(DISTANCE_PREFIX) :] not in self._distance_links
+                ]:
+                    del table[source]
             # Costs per mode of devices that are no longer linked to a mode.
             linked = tuple(
                 mode_key(key, "")
@@ -376,6 +445,21 @@ class TariffRuntime:
             self._settle(now)
         self._ensure_today(now.date())
         self.ledger.prune(now.date())
+        distance_entities = sorted(
+            {
+                entity
+                for roles in self._distance_links.values()
+                for entity in roles.values()
+            }
+        )
+        # Readings that arrived while history was read, just before listening.
+        self._start_distance(dt_util.now())
+        if distance_entities:
+            self._unsubs.append(
+                async_track_state_change_event(
+                    self.hass, distance_entities, self._on_distance_change
+                )
+            )
         for key, entity_id in self._mode_links.items():
             self._current_mode[key] = (
                 _mode_of(self.hass.states.get(entity_id))
@@ -477,10 +561,19 @@ class TariffRuntime:
                 for table in ("days", "totals"):
                     saved = getattr(self._stored_ledger, table)
                     for source in saved:
-                        if source == key or (
-                            key in self._mode_links
-                            and key not in self._modes_reset
-                            and source.startswith(mode_key(key, ""))
+                        if (
+                            source == key
+                            or (
+                                key in self._mode_links
+                                and key not in self._modes_reset
+                                and source.startswith(mode_key(key, ""))
+                            )
+                            or (
+                                key in self._distance_links
+                                and self._distance_identity[key]
+                                not in self._distance_reset
+                                and source == distance_key(key)
+                            )
                         ):
                             getattr(self.ledger, table)[source] = saved[source]
                 continue
@@ -527,7 +620,9 @@ class TariffRuntime:
                     )
                     continue
                 _name, price = pricer(day_start.replace(hour=12))
-                self.ledger.add_energy(key, day_start.date(), _name, change, price)
+                self.ledger.add_energy(
+                    key, day_start.date(), _name, change, price, day_start
+                )
             for day, total in capped_days.items():
                 book_export_day(
                     self.ledger, key, day, total, self.timeline.plan_on(day)
@@ -599,7 +694,9 @@ class TariffRuntime:
                     book_export_day(self.ledger, source, when.date(), amount, plan)
                 else:
                     band, rate = pricers[source](when)
-                    self.ledger.add_energy(source, when.date(), band, amount, rate)
+                    self.ledger.add_energy(
+                        source, when.date(), band, amount, rate, when
+                    )
                     if source in self._mode_links:
                         self._book_modes(
                             source,
@@ -742,7 +839,7 @@ class TariffRuntime:
                 else:
                     grid = 1.0  # No import reading for this hour: assume the grid paid.
                 band, price = pricer(when)
-                self.ledger.add_energy(key, when.date(), band, kwh, price * grid)
+                self.ledger.add_energy(key, when.date(), band, kwh, price * grid, when)
                 if key in self._mode_links:
                     self._book_modes(
                         key,
@@ -760,7 +857,7 @@ class TariffRuntime:
                 day = day_start.date()
                 grid = day_share(day)
                 band, price = pricer(day_start.replace(hour=12))
-                self.ledger.add_energy(key, day, band, kwh, price * grid)
+                self.ledger.add_energy(key, day, band, kwh, price * grid, day_start)
                 note_day(day, kwh, kwh * price * grid)
 
         if restored or not (imp_h or imp_d):
@@ -884,7 +981,7 @@ class TariffRuntime:
             # because the import lump that arrives later also covers these hours.
             for key in self._device_keys:
                 for when, band, price, kwh in priced(key):
-                    self.ledger.add_energy(key, when.date(), band, kwh, price)
+                    self.ledger.add_energy(key, when.date(), band, kwh, price, when)
                     self._book_slot_modes(key, when, band, kwh, price)
                     self._forced[0] += kwh
                     self._forced[1] += kwh * price
@@ -904,7 +1001,7 @@ class TariffRuntime:
         device_cost = 0.0
         for key in self._device_keys:
             for when, band, price, kwh in priced(key):
-                self.ledger.add_energy(key, when.date(), band, kwh, price * grid)
+                self.ledger.add_energy(key, when.date(), band, kwh, price * grid, when)
                 self._book_slot_modes(key, when, band, kwh, price * grid)
                 device_cost += kwh * price * grid
         last = hours[-1]
@@ -1124,6 +1221,271 @@ class TariffRuntime:
             "kwh_total": round(total["kwh"], 3),
         }
 
+    # ---- distance ----------------------------------------------------------------------------
+
+    def _new_point(self, key: str, km: float, at: datetime) -> dict[str, Any]:
+        """A window starting now, from this reading."""
+        local = dt_util.as_local(at)
+        return {
+            "start_day": local.date().isoformat(),
+            "start_at": at.astimezone(dt_util.UTC).isoformat(),
+            "start_km": km,
+            "month": local.strftime("%Y-%m"),
+            "month_km": km,
+            "last_km": km,
+            "last_at": at.astimezone(dt_util.UTC).isoformat(),
+            "source": self._distance_identity[key],
+        }
+
+    def _mirror(self, key: str) -> None:
+        """Copy the charger's bookings from the window's start into its distance source."""
+        point = self.distance.points[key]
+        start = dt_util.parse_datetime(
+            point.get("start_at", "")
+        ) or dt_util.start_of_local_day(date.fromisoformat(point["start_day"]))
+        self.ledger.mirrors[key] = (distance_key(key), start)
+
+    async def _async_distance_history(self, now: datetime) -> None:
+        """Start each window where both the odometer and the charger have recorder data.
+
+        The odometer's daily statistics give each day's closing reading. The window starts
+        on the first day both have data, from the odometer's reading at the close of the
+        day before, so the kilometres and the charger's cost cover the same days.
+        """
+        odometers = {
+            roles["odometer"]: key for key, roles in self._distance_links.items()
+        }
+        chargers = {
+            entity: key
+            for entity, (key, _pricer) in self._sources.items()
+            if key in self._distance_links
+        }
+        today = now.date()
+
+        def fetch() -> dict[str, list[dict[str, Any]]]:
+            return _statistics_result(
+                statistics_during_period(
+                    self.hass,
+                    HISTORY_EPOCH,
+                    now.astimezone(dt_util.UTC),
+                    set(odometers) | set(chargers),
+                    "day",
+                    {"distance": "km", "energy": "Wh"},
+                    {"state", "change"},
+                )
+            )
+
+        try:
+            daily = await get_instance(self.hass).async_add_executor_job(fetch)
+        except (OSError, HomeAssistantError, SQLAlchemyError, ValueError) as err:
+            _LOGGER.warning(
+                "Could not read odometer history (%s); using saved readings",
+                type(err).__name__,
+            )
+            return
+        first_charged = {
+            key: min(
+                (
+                    dt_util.as_local(_row_start(row)).date()
+                    for row in daily.get(entity, [])
+                ),
+                default=None,
+            )
+            for entity, key in chargers.items()
+        }
+        month_start = date(today.year, today.month, 1)
+        for odometer, key in odometers.items():
+            if self._distance_identity[key] in self._distance_reset:
+                continue
+            closing: list[tuple[date, float]] = []  # complete days only
+            for row in daily.get(odometer, []):
+                try:
+                    day = dt_util.as_local(_row_start(row)).date()
+                    km = float(row["state"])
+                except (KeyError, TypeError, ValueError, OverflowError, OSError):
+                    continue
+                if day < today and math.isfinite(km) and km >= 0:
+                    closing.append((day, km))
+            charged = first_charged.get(key)
+            if not closing or charged is None:
+                continue
+            closing.sort()
+            start_day = max(closing[0][0] + timedelta(days=1), charged)
+            before = [km for day, km in closing if day < start_day]
+            if start_day > today or not before:
+                continue
+            point = {
+                "start_day": start_day.isoformat(),
+                "start_km": before[-1],
+                "source": self._distance_identity[key],
+                "month": month_start.strftime("%Y-%m"),
+                "month_km": before[-1],
+            }
+            if month_start > start_day:
+                in_month = [km for day, km in closing if day < month_start]
+                point["month_km"] = in_month[-1]
+            if saved := self.distance.points.get(key):
+                for field in ("last_km", "last_at"):
+                    if field in saved:
+                        point[field] = saved[field]
+            self.distance.points[key] = point
+
+    async def _async_backfill_charges(self, now: datetime) -> None:
+        """On a new link, find the last week's charging at home and away."""
+        new = {
+            key: roles
+            for key, roles in self._distance_links.items()
+            if {"battery", "location"} <= set(roles)
+            and key not in self.distance.charges
+            and key not in self.distance.last_level
+        }
+        if not new:
+            return
+        now_utc = now.astimezone(dt_util.UTC)
+        entities = sorted(
+            {roles[r] for roles in new.values() for r in ("battery", "location")}
+        )
+
+        def fetch() -> dict[str, list[Any]]:
+            return get_significant_states(
+                self.hass,
+                now_utc - MODE_BACKFILL,
+                now_utc,
+                entities,
+                significant_changes_only=False,
+                no_attributes=False,  # The battery level's unit is checked.
+            )
+
+        try:
+            states = await get_instance(self.hass).async_add_executor_job(fetch)
+        except (OSError, HomeAssistantError, SQLAlchemyError, ValueError) as err:
+            _LOGGER.warning(
+                "Could not read battery history (%s); charging is tracked from now on",
+                type(err).__name__,
+            )
+            return
+        for key, roles in new.items():
+            events = sorted(
+                (
+                    (state.last_changed, role, state)
+                    for role in ("location", "battery")  # Where, then what, on a tie.
+                    for state in states.get(roles[role], [])
+                    if isinstance(state, State)
+                ),
+                key=lambda event: (event[0], event[1] == "battery"),
+            )
+            location: State | None = None
+            for changed, role, state in events:
+                if role == "location":
+                    location = state
+                elif (level := battery_level(state)) is not None:
+                    self.distance.note_charge(
+                        key, level, at_home(location), dt_util.as_local(changed).date()
+                    )
+
+    def _start_distance(self, now: datetime) -> None:
+        """Start a link without history from the current reading, and copy charger costs."""
+        # A month that turned while HA was off starts from the last reading before.
+        self._roll_distance_month(now)
+        for key, roles in self._distance_links.items():
+            km = odometer_km(self.hass.states.get(roles["odometer"]))
+            point = self.distance.points.get(key)
+            if point is None:
+                if km is None:
+                    continue  # Started on the first reading.
+                point = self.distance.points[key] = self._new_point(key, km, now)
+            elif km is not None:
+                self._accept_km(point, km, now)
+            self._mirror(key)
+            if (level := battery_level(self._state(roles, "battery"))) is not None and (
+                key not in self.distance.last_level
+            ):
+                self.distance.last_level[key] = level
+
+    @staticmethod
+    def _accept_km(point: dict[str, Any], km: float, now: datetime) -> bool:
+        """Take an odometer reading, unless it is a glitch."""
+        return accept_km(point, km, now.astimezone(dt_util.UTC))
+
+    def _state(self, roles: dict[str, str], role: str) -> State | None:
+        return self.hass.states.get(roles[role]) if role in roles else None
+
+    @callback
+    def _on_distance_change(self, event: Event) -> None:
+        if self._stopping:
+            return
+        entity_id = event.data["entity_id"]
+        now = dt_util.now()
+        changed = False
+        for key, roles in self._distance_links.items():
+            if roles.get("odometer") == entity_id:
+                km = odometer_km(event.data.get("new_state"))
+                if km is not None:
+                    if key not in self.distance.points:
+                        self.distance.points[key] = self._new_point(key, km, now)
+                        self._mirror(key)
+                        changed = True
+                    else:
+                        changed |= self._accept_km(self.distance.points[key], km, now)
+            if roles.get("battery") == entity_id:
+                level = battery_level(event.data.get("new_state"))
+                if level is not None:
+                    home = at_home(self._state(roles, "location"))
+                    changed |= self.distance.note_charge(key, level, home, now.date())
+        if changed:
+            self._request_save()
+            async_dispatcher_send(self.hass, signal_update(self.entry_id))
+
+    def _roll_distance_month(self, now: datetime) -> None:
+        """At the start of a month, the last reading becomes the month's start."""
+        month = dt_util.as_local(now).strftime("%Y-%m")
+        for point in self.distance.points.values():
+            if point.get("month") != month and "last_km" in point:
+                point["month"] = month
+                point["month_km"] = point["last_km"]
+
+    def distance_links(self) -> dict[str, tuple[str, dict[str, str]]]:
+        """Tracked charger entity -> (its ledger key, its linked entities)."""
+        return {
+            entity: (key, self._distance_links[key])
+            for entity, (key, _p) in self._sources.items()
+            if key in self._distance_links
+        }
+
+    def distance_values(self, key: str) -> dict[str, Any]:
+        """Distance, and cost and energy per 100 km, for the month and since the start."""
+        point = self.distance.points.get(key)
+        if point is None or "last_km" not in point:
+            return {}
+        today = dt_util.now().date()
+        start_day = date.fromisoformat(point["start_day"])
+        month_start = max(date(today.year, today.month, 1), start_day)
+        km_month = max(point["last_km"] - point.get("month_km", point["start_km"]), 0.0)
+        km_total = max(point["last_km"] - point["start_km"], 0.0)
+        source = distance_key(key)
+        _cost_today, cost_month = device_cost(self.ledger, source, today)
+        kwh_month = sum(band_kwh(self.ledger, source, today, "month").values())
+        total = self.ledger.totals.get(source, {"kwh": 0.0, "cost": 0.0})
+
+        def per_100(amount: float, km: float, digits: int) -> float | None:
+            return round(amount / km * 100, digits) if km >= 1 else None
+
+        def away_share(since: date) -> float | None:
+            home, away = self.distance.charge_split(key, since)
+            return round(away / (home + away) * 100, 1) if home + away > 0 else None
+
+        return {
+            "km_month": round(km_month, 1),
+            "km_total": round(km_total, 1),
+            "cost_100_month": per_100(cost_month, km_month, 2),
+            "cost_100_total": per_100(total["cost"], km_total, 2),
+            "kwh_100_month": per_100(kwh_month, km_month, 1),
+            "kwh_100_total": per_100(total["kwh"], km_total, 1),
+            "away_month": away_share(month_start),
+            "away_total": away_share(start_day),
+            "since": point["start_day"],
+        }
+
     def mode_since(self, key: str) -> str | None:
         return self.modes.since(key)
 
@@ -1291,6 +1653,8 @@ class TariffRuntime:
             data["import_gaps"] = dict(self._import_gaps)
         if any(self._forced):
             data["solar_forced"] = list(self._forced)
+        if self._distance_links:
+            data["distance"] = self.distance.to_dict()
         if self._mode_links:
             self.modes.last.update(self._current_mode)
             data["modes"] = self.modes.to_dict()
@@ -1403,6 +1767,7 @@ class TariffRuntime:
             self._note_import(now, online=False)
         self._settle(now)
         self._settle_modes(now)
+        self._roll_distance_month(now)
         self.ledger.prune(today)
         self._prune_pending(now)
         self._request_save()
