@@ -25,6 +25,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import TariffConfigEntry
 from .const import DOMAIN, provider_name, signal_update
+from .engine import UNTRACKED_KEY
 from .runtime import TariffRuntime
 
 
@@ -42,8 +43,17 @@ def _current_attrs(rt: TariffRuntime) -> dict[str, Any]:
     return {"rate_inc_gst": round(rate, 4), "next_change": f"{until:02d}:00"}
 
 
+def _pricing_attrs(rt: TariffRuntime) -> dict[str, Any]:
+    return {"pricing": rt.device_pricing}
+
+
 def _money(
-    key: str, name: str, fn: Callable[[TariffRuntime], Any], *, source: str = "import"
+    key: str,
+    name: str,
+    fn: Callable[[TariffRuntime], Any],
+    *,
+    source: str = "import",
+    attrs_fn: Callable[[TariffRuntime], dict[str, Any]] | None = None,
 ) -> TariffSensorDescription:
     """Cost for today or the month to date. It resets each period, so it has no
     state class: that keeps it out of the Energy dashboard's cost picker, which
@@ -56,6 +66,7 @@ def _money(
         suggested_display_precision=2,
         value_fn=fn,
         source=source,
+        attrs_fn=attrs_fn,
     )
 
 
@@ -66,6 +77,7 @@ def _lifetime(
     *,
     source: str = "import",
     object_name: str | None = None,
+    attrs_fn: Callable[[TariffRuntime], dict[str, Any]] | None = None,
 ) -> TariffSensorDescription:
     """Cumulative cost, for the Energy dashboard. Only ever rises, so state class is total."""
     return TariffSensorDescription(
@@ -78,6 +90,7 @@ def _lifetime(
         value_fn=fn,
         source=source,
         object_name=object_name,
+        attrs_fn=attrs_fn,
     )
 
 
@@ -230,18 +243,41 @@ def _descriptions(rt: TariffRuntime) -> list[TariffSensorDescription]:
                 f"{label} cost today",
                 lambda r, d=device: r.device_costs(d)[0],
                 source=device,
+                attrs_fn=_pricing_attrs,
             ),
             _money(
                 f"{key}_month",
                 f"{label} cost month to date",
                 lambda r, d=device: r.device_costs(d)[1],
                 source=device,
+                attrs_fn=_pricing_attrs,
             ),
             _lifetime(
                 f"{key}_total",
                 f"{label} cost total",
                 lambda r, d=device: r.lifetime_device(d),
                 source=device,
+                attrs_fn=_pricing_attrs,
+            ),
+        ]
+    if rt.solar_mode:
+        # Everything the tracked devices don't account for, so the parts add up
+        # to the grid import cost.
+        descriptions += [
+            _money(
+                "untracked_cost_today",
+                "Untracked usage cost today",
+                lambda r: r.device_costs(UNTRACKED_KEY)[0],
+            ),
+            _money(
+                "untracked_cost_month",
+                "Untracked usage cost month to date",
+                lambda r: r.device_costs(UNTRACKED_KEY)[1],
+            ),
+            _lifetime(
+                "untracked_cost_total",
+                "Untracked usage cost total",
+                lambda r: r.lifetime_device(UNTRACKED_KEY),
             ),
         ]
     return descriptions + _band_descriptions(rt)

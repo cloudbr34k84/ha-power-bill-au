@@ -35,6 +35,7 @@ from .const import (
     CONF_PLANS,
     CONF_PROVIDER,
     CONF_RATES_INCLUDE_GST,
+    CONF_SOLAR_ENTITY,
     CONF_SOURCES,
     CONF_TRACKED_DEVICES,
     DOMAIN,
@@ -275,6 +276,7 @@ class _TariffStepsMixin:
         primary = {
             data.get(CONF_IMPORT_ENTITY),
             data.get(CONF_EXPORT_ENTITY),
+            self._data.get(CONF_SOLAR_ENTITY),
         }
         if len(set(devices)) != len(devices) or any(
             entity in primary or not valid_energy_sensor(self.hass.states.get(entity))
@@ -378,8 +380,50 @@ class EnergyTariffCostOptionsFlow(_TariffStepsMixin, OptionsFlowWithReload):
                 "demand",
                 "feed_in",
                 "devices",
+                "solar",
                 "energy_dashboard",
             ],
+        )
+
+    async def async_step_solar(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Price tracked devices at each interval's grid share, using solar production."""
+        data, options = prepare_sources(
+            self.hass, self.config_entry.data, self.config_entry.options
+        )
+        merged = {**data, **options}
+        if not merged.get(CONF_EXPORT_ENTITY):
+            return self.async_abort(reason="solar_needs_export_meter")
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            solar = user_input.get(CONF_SOLAR_ENTITY) or None
+            taken = {
+                merged.get(CONF_IMPORT_ENTITY),
+                merged.get(CONF_EXPORT_ENTITY),
+                *(merged.get(CONF_TRACKED_DEVICES) or []),
+            }
+            if solar is not None and (
+                solar in taken or not valid_energy_sensor(self.hass.states.get(solar))
+            ):
+                errors[CONF_SOLAR_ENTITY] = "invalid_energy_sensor"
+            else:
+                new = self._options_data()
+                new.pop(CONF_SOLAR_ENTITY, None)
+                if solar is not None:
+                    new[CONF_SOLAR_ENTITY] = solar
+                return self.async_create_entry(title="", data=new)
+        return self.async_show_form(
+            step_id="solar",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_SOLAR_ENTITY,
+                        description={"suggested_value": merged.get(CONF_SOLAR_ENTITY)},
+                    ): _energy_sensor(),
+                }
+            ),
+            errors=errors,
         )
 
     async def async_step_energy_dashboard(

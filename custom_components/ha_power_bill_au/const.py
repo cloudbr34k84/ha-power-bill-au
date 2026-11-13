@@ -25,6 +25,7 @@ CONF_RATES_INCLUDE_GST = "rates_include_gst"
 CONF_DAILY_SUPPLY = "daily_supply"
 CONF_DAILY_MEMBERSHIP = "daily_membership"
 CONF_TRACKED_DEVICES = "tracked_devices"
+CONF_SOLAR_ENTITY = "solar_entity"  # optional: prices tracked devices at the grid share
 CONF_PLANS = "plans"  # optional list of dated plans; see runtime.build_timeline
 CONF_SOURCES = "sources"  # persistent source identities and legacy sensor/ledger keys
 

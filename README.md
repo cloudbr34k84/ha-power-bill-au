@@ -51,6 +51,35 @@ For each contract:
 - Lifetime totals for import cost, export credit and each tracked meter. These use the
   `total` state class, so you can point the Energy dashboard at them.
 
+### What your devices really cost (solar)
+
+Without solar, every tracked device is priced at the full import rate. With solar, that
+overstates what a device costs you: a car charged while the panels cover the house adds
+nothing to your bill. Turn on solar pricing in **Configure > Solar** by choosing your solar
+production sensor (an export meter is required).
+
+For every interval the integration works out how the house was supplied:
+
+- **Grid share** = import ÷ (import − export + solar production).
+- Each tracked device pays its kWh × that hour's import rate × the grid share. Running on
+  surplus solar (while exporting) costs nothing; running at night costs the full rate.
+- **Untracked usage cost** gets everything the tracked devices don't account for, priced the
+  same way. Tracked devices plus untracked always add up to the grid import cost.
+
+Device and untracked costs are priced per hour, live and in history alike, so the totals
+don't change after a restart. Each hour is priced two minutes after it ends, which means
+the device cost sensors update once an hour. An hour in which the import meter was offline
+is held and priced together with the hour it reports again in, because that reading
+carries the import it missed; after a day offline, devices fall back to the full rate.
+The device sensors show the method in force as the `pricing` attribute (`solar_share` or
+`import_rate`). Turning solar pricing on or off recalculates history from recorder
+statistics; a tracked meter the recorder has no statistics for keeps its saved costs.
+
+Self-consumed solar is treated as free. The feed-in credit you gave up by using it yourself
+is not charged to the device; on most current feed-in rates it is a few cents per kWh. Fixed
+daily charges, demand charges and export credits stay as their own lines and are not split
+between devices.
+
 ### Using it in the Energy dashboard
 
 In **Settings > Dashboards > Energy > Grid**, pick these two sensors. Only the lifetime
@@ -128,6 +157,8 @@ Settings → Devices & Services → HA Power Bill AU → Configure:
   new plan. Earlier usage keeps the plan it was recorded under.
 - **Demand charge** if your plan charges for your highest kW each month.
 - **Stepped feed-in** if your solar feed-in tariff pays a higher rate for the first kWh each day.
+- **Solar** to price tracked devices by what they took from the grid. See
+  [What your devices really cost](#what-your-devices-really-cost-solar).
 - **Add to the Energy dashboard** to select the lifetime cost and credit sensors for your
   grid meters. See [Using it in the Energy dashboard](#using-it-in-the-energy-dashboard).
 - **Tracked devices** to add or remove extra energy sensors (an EV charger, a pool pump). Each
@@ -196,6 +227,21 @@ two rates and the number of kWh per day that step 1 covers. If your bill has one
 - Residential spike filters ignore statistics above 30 kWh per hour, 300 kWh per day and
   4 kWh per five-minute demand slot. These limits may exclude valid high-capacity usage.
 - History before the first dated plan uses that plan's rates.
+- Solar pricing shares each hour's solar equally across the house's loads; it cannot tell
+  which load the panels "really" fed, or when in the hour a load ran. A car that charged at
+  the start of a cloudy hour that turned sunny is charged the hour's average share.
+- Tracked meters must not overlap (one a sub-meter of another), or the parts will add up
+  to more than the import. Tracked meters that read more than the whole house are not
+  scaled down; untracked usage is then zero for that hour.
+- An import meter that freezes on its last value while still reporting as available can't
+  be told apart from zero import: devices look free for those hours and the import that
+  arrives later is booked to untracked usage.
+- A tracked meter with no recorder statistics keeps its saved costs, and so does untracked
+  usage. After upgrading from an earlier version such a contract starts untracked usage
+  from the upgrade.
+- The solar sensor is not followed through an entity ID rename. If it is renamed or goes
+  offline, devices fall back to the full import rate until you select it again.
+- A battery is not modelled: its charging and discharging would need to be in the balance.
 
 ## Removal
 
@@ -265,8 +311,8 @@ The integration folder and manifest domain must both remain `ha_power_bill_au`.
 
 ### Release versions
 
-The current manifest version is `0.2.4` in
-`custom_components/ha_power_bill_au/manifest.json`. The matching release tag is `v0.2.4`; the manifest value has no `v` prefix.
+The current manifest version is `0.3.0` in
+`custom_components/ha_power_bill_au/manifest.json`. The matching release tag is `v0.3.0`; the manifest value has no `v` prefix.
 For later releases, update the manifest and [CHANGELOG.md](CHANGELOG.md) before tagging:
 `0.1.1` for a patch, `0.2.0` for a feature release during initial development, and `1.0.0`
 for the first stable release. Never reuse a published version number.

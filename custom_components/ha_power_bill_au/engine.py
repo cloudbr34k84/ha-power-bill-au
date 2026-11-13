@@ -394,6 +394,28 @@ class UsageLedger:
         return self.totals.get(source, _empty_cell())["cost"]
 
 
+UNTRACKED_KEY = "untracked"
+
+
+def solar_split(
+    import_kwh: float, export_kwh: float, solar_kwh: float, device_kwh: float
+) -> tuple[float, float]:
+    """Split one interval's grid import across the house's loads.
+
+    The house used `import - export + solar` kWh, of which `import` came from the grid.
+    Each load pays for that grid share of its energy, so every load together pays exactly
+    the grid import. Returns (grid share 0-1, kWh used by loads that are not tracked).
+
+    The house is never taken as smaller than the import, so a solar reading that lags the
+    grid meter (or is missing) prices loads at the full grid rate rather than above it.
+    """
+    imported = max(import_kwh, 0.0)
+    house = max(imported - max(export_kwh, 0.0) + max(solar_kwh, 0.0), imported)
+    if house <= 0:
+        return 0.0, 0.0
+    return imported / house, max(house - max(device_kwh, 0.0), 0.0)
+
+
 def book_hourly(
     ledger: UsageLedger,
     source: str,

@@ -35,11 +35,13 @@ from .const import (
     CONF_IMPORT_ENTITY,
     CONF_PLANS,
     CONF_RATES_INCLUDE_GST,
+    CONF_SOLAR_ENTITY,
     CONF_TRACKED_DEVICES,
     signal_update,
 )
 from .engine import (
     FIXED_KEY,
+    UNTRACKED_KEY,
     Band,
     Plan,
     Schedule,
@@ -52,6 +54,7 @@ from .engine import (
     book_hourly,
     current_tariff,
     device_cost,
+    solar_split,
     summarize,
 )
 from .sources import source_record
@@ -69,6 +72,10 @@ DEMAND_SCAN_DAYS = (
 )
 DEMAND_REFRESH = timedelta(minutes=5)
 PENDING_RETENTION = timedelta(days=1)
+SOLAR_KEY = "solar"
+HOUR = timedelta(hours=1)
+# An hour is priced once the readings that arrived just before it ended are in.
+SETTLE_DELAY = timedelta(minutes=2)
 
 
 def _row_start(row: dict[str, Any]) -> datetime:
@@ -97,6 +104,28 @@ def _statistics_result(result: Any) -> dict[str, list[dict[str, Any]]]:
         else:
             raise HomeAssistantError("Recorder returned invalid statistics rows")
     return normalized
+
+
+def _hour_floor(at: datetime) -> datetime:
+    return at.replace(minute=0, second=0, microsecond=0)
+
+
+def _valid_rows(
+    rows: list[dict[str, Any]], limit: float, now: datetime
+) -> list[tuple[datetime, float]]:
+    """Recorder rows as (local period start, kWh), without invalid or out-of-range rows."""
+    result = []
+    for row in rows:
+        try:
+            change = float(row["change"]) / 1000.0
+            when = dt_util.as_local(_row_start(row))
+        except (KeyError, TypeError, ValueError, OverflowError, OSError):
+            continue
+        if math.isfinite(change) and 0 <= change <= limit and when <= now:
+            result.append((when, change))
+    if discarded := len(rows) - len(result):
+        _LOGGER.debug("Filtered %d invalid or out-of-range recorder rows", discarded)
+    return result
 
 
 LEGACY_START = date(2000, 1, 1)
@@ -157,6 +186,19 @@ class TariffRuntime:
         self.import_entity: str = cfg[CONF_IMPORT_ENTITY]
         self.export_entity: str | None = cfg.get(CONF_EXPORT_ENTITY) or None
         self.device_entities: list[str] = list(cfg.get(CONF_TRACKED_DEVICES) or [])
+        # Solar-share pricing needs both the export meter and solar production.
+        self.solar_entity: str | None = cfg.get(CONF_SOLAR_ENTITY) or None
+        self.solar_mode = bool(self.solar_entity and self.export_entity)
+        # Device and untracked usage is priced for every hour before this (UTC).
+        self._settled_through: datetime | None = None
+        self._saved_settled_through: datetime | None = None
+        self._settle_from: dict[str, datetime] = {}
+        # UTC hours the import meter was offline in: True while it is still offline,
+        # False once a reading arrived after the outage in the same hour.
+        self._import_gaps: dict[str, bool] = {}
+        # kWh and cost devices were charged at the full rate during a long outage, to
+        # take off the import that arrives when the meter returns.
+        self._forced: list[float] = [0.0, 0.0]
         self.ledger = UsageLedger()
         self._unsubs: list[Callable[[], None]] = []
         self._history_start = dt_util.now().date()
@@ -180,6 +222,11 @@ class TariffRuntime:
             )
             ledger_key = record.get("ledger_key") or device
             self._sources.setdefault(device, (ledger_key, self._import_price))
+        self._device_keys = {
+            key
+            for entity, (key, _pricer) in self._sources.items()
+            if entity in self.device_entities
+        }
 
     def _import_price(self, when: datetime) -> tuple[str, float]:
         plan = self.timeline.plan_on(when.date())
@@ -209,6 +256,7 @@ class TariffRuntime:
                     )
                     self._stored_ledger = UsageLedger(stored)
                     self._load_pending(stored.get("pending_energy", {}), now)
+                    self._load_solar_progress(stored, now)
                 signatures = set(str(stored.get("demand_signature", "")).split("|"))
                 peaks = UsageLedger(
                     {"demand_peaks": stored.get("demand_peaks", {})}
@@ -239,15 +287,25 @@ class TariffRuntime:
             self.ledger = self._stored_ledger
             self.ledger.demand_peaks = peaks
         # live baseline: readings from now on are added as they change
-        for entity, (key, _pricer) in self._sources.items():
+        for entity, (key, _pricer) in self._watched().items():
             value = energy_value(self.hass.states.get(entity))
             if value is not None:
                 self.ledger.last_seen[key] = value
+        if self.solar_mode:
+            if not self._settle_from:  # No recorder: continue from the saved ledger.
+                resume = self._saved_settled_through or _hour_floor(
+                    now.astimezone(dt_util.UTC)
+                )
+                self._settle_from = dict.fromkeys(
+                    (*self._device_keys, UNTRACKED_KEY), resume
+                )
+            self._settled_through = min(self._settle_from.values())
+            self._settle(now)
         self._ensure_today(now.date())
         self.ledger.prune(now.date())
         self._unsubs.append(
             async_track_state_change_event(
-                self.hass, list(self._sources), self._on_source_change
+                self.hass, list(self._watched()), self._on_source_change
             )
         )
         self._unsubs.append(
@@ -264,6 +322,8 @@ class TariffRuntime:
     async def _async_backfill(self, now: datetime) -> None:
         """Rebuild available meter history without installation-specific date boundaries."""
         ids = set(self._sources)
+        if self.solar_mode:
+            ids.add(self.solar_entity)
         recorder = get_instance(self.hass)
 
         def fetch(
@@ -298,21 +358,16 @@ class TariffRuntime:
         def valid_rows(
             rows: list[dict[str, Any]], limit: float
         ) -> list[tuple[datetime, float]]:
-            result = []
-            for row in rows:
-                try:
-                    change = float(row["change"]) / 1000.0
-                    when = dt_util.as_local(_row_start(row))
-                except (KeyError, TypeError, ValueError, OverflowError, OSError):
-                    continue
-                if math.isfinite(change) and 0 <= change <= limit and when <= now:
-                    result.append((when, change))
-            if discarded := len(rows) - len(result):
-                _LOGGER.debug(
-                    "Filtered %d invalid or out-of-range recorder rows", discarded
-                )
-            return result
+            return _valid_rows(rows, limit, now)
 
+        deferred: dict[
+            str,
+            tuple[
+                list[tuple[datetime, float]],
+                list[tuple[datetime, float]],
+                Callable[[datetime], tuple[str, float]],
+            ],
+        ] = {}
         first_import: date | None = None
         for entity, (key, pricer) in self._sources.items():
             capped_days: dict[
@@ -351,6 +406,10 @@ class TariffRuntime:
             )
             if ends:
                 self._history_watermarks[key] = max(ends)
+            if self.solar_mode and key in self._device_keys:
+                # Priced below, once the grid share of every hour is known.
+                deferred[key] = (hour_rows, day_rows, pricer)
+                continue
             hours = []
             for when, change in hour_rows:
                 plan = self.timeline.plan_on(when.date())
@@ -375,6 +434,8 @@ class TariffRuntime:
                 book_export_day(
                     self.ledger, key, day, total, self.timeline.plan_on(day)
                 )
+        if self.solar_mode:
+            self._allocate_history(daily, hourly, deferred, now)
         if first_import is not None:
             self._history_start = first_import
         elif self._stored_ledger is not None:
@@ -403,7 +464,7 @@ class TariffRuntime:
         """Load a bounded buffer of live increments not yet covered by recorder."""
         if not isinstance(pending, dict):
             return
-        allowed = {key for key, _ in self._sources.values()}
+        allowed = {key for key, _ in self._watched().values()}
         cutoff = now.astimezone(dt_util.UTC) - PENDING_RETENTION
         for source, slots in pending.items():
             if source not in allowed or not isinstance(slots, dict):
@@ -423,6 +484,10 @@ class TariffRuntime:
         """Replay increments after each source's completed recorder periods once."""
         pricers = {key: pricer for key, pricer in self._sources.values()}
         for source, slots in self._pending_energy.items():
+            if source not in pricers or (
+                self.solar_mode and source in self._device_keys
+            ):
+                continue  # Solar readings, and devices priced by `_settle`.
             watermark = self._history_watermarks.get(source)
             if watermark is None:
                 continue  # This source was restored from its complete saved ledger.
@@ -437,6 +502,280 @@ class TariffRuntime:
                 else:
                     band, rate = pricers[source](when)
                     self.ledger.add_energy(source, when.date(), band, amount, rate)
+
+    def _watched(
+        self,
+    ) -> dict[str, tuple[str, Callable[[datetime], tuple[str, float]] | None]]:
+        """Every meter whose readings are followed: the priced sources, plus solar."""
+        watched: dict[str, tuple[str, Callable[[datetime], tuple[str, float]] | None]]
+        watched = dict(self._sources)
+        if self.solar_mode and self.solar_entity not in watched:
+            watched[self.solar_entity] = (SOLAR_KEY, None)  # type: ignore[index]
+        return watched
+
+    def _allocate_history(
+        self,
+        daily: dict[str, list[dict[str, Any]]],
+        hourly: dict[str, list[dict[str, Any]]],
+        deferred: dict[
+            str,
+            tuple[
+                list[tuple[datetime, float]],
+                list[tuple[datetime, float]],
+                Callable[[datetime], tuple[str, float]],
+            ],
+        ],
+        now: datetime,
+    ) -> None:
+        """Price device history at each hour's grid share, and book the untracked rest.
+
+        History is booked up to one common hour `start`: the earliest recent watermark of
+        the import meter and the devices with recorder rows. Later hours are priced live
+        by `_settle` from the buffered readings, so no hour is booked twice.
+        """
+        now_utc = now.astimezone(dt_util.UTC)
+        solar = self.solar_entity or ""
+        export = self.export_entity or ""
+
+        def by_hour(entity: str) -> dict[datetime, tuple[datetime, float]]:
+            # Keyed by UTC: the local hour repeated at the end of daylight saving is two hours.
+            return {
+                when.astimezone(dt_util.UTC): (when, kwh)
+                for when, kwh in _valid_rows(
+                    hourly.get(entity, []), MAX_HOURLY_KWH, now
+                )
+            }
+
+        def by_day(entity: str) -> dict[date, float]:
+            return {
+                when.date(): kwh
+                for when, kwh in _valid_rows(daily.get(entity, []), MAX_DAILY_KWH, now)
+            }
+
+        imp_h, exp_h, sol_h = (
+            by_hour(self.import_entity),
+            by_hour(export),
+            by_hour(solar),
+        )
+        imp_d, exp_d, sol_d = by_day(self.import_entity), by_day(export), by_day(solar)
+
+        recent = now_utc - PENDING_RETENTION
+        marks = [
+            self._history_watermarks[key]
+            for key in ("import", *deferred)
+            if key in self._history_watermarks
+            and self._history_watermarks[key] >= recent
+        ]
+        saved = self._saved_settled_through
+        start = min(marks) if marks else (saved or _hour_floor(now_utc))
+        # An outage still in the buffer was priced live together with the hour the meter
+        # returned in: price it from the buffer again, the same way.
+        outages = [
+            at.astimezone(dt_util.UTC)
+            for gap in self._import_gaps
+            if (at := dt_util.parse_datetime(gap)) is not None
+        ]
+        if outages:
+            start = min(start, *outages)
+        # Never leave to the buffer hours it no longer holds (HA was off over a day).
+        buffered = [
+            _hour_floor(at.astimezone(dt_util.UTC))
+            for slots in self._pending_energy.values()
+            for slot in slots
+            if (at := dt_util.parse_datetime(slot)) is not None
+        ]
+        if buffered:
+            start = max(start, min(buffered))
+        else:
+            every = [
+                self._history_watermarks[key]
+                for key in ("import", *deferred)
+                if key in self._history_watermarks
+            ]
+            start = max(start, *every) if every else start
+        # Devices without recorder rows come back from the saved ledger, which already
+        # holds what was priced live before the restart.
+        restored = self._device_keys - set(deferred)
+        restored_from = max(start, saved or _hour_floor(now_utc))
+        self._settle_from = {key: start for key in deferred}
+        self._settle_from.update(dict.fromkeys(restored, restored_from))
+
+        def value(table: dict[Any, tuple[datetime, float]], at: Any) -> float:
+            return table[at][1] if at in table else 0.0
+
+        device_hours: dict[datetime, float] = {}
+        for key, (hour_rows, day_rows, pricer) in deferred.items():
+            for when, kwh in hour_rows:
+                at = when.astimezone(dt_util.UTC)
+                if at >= start:
+                    continue  # Priced live from the buffer.
+                grid = 1.0  # No import reading for this hour: assume the grid paid.
+                if at in imp_h:
+                    grid = solar_split(
+                        imp_h[at][1], value(exp_h, at), value(sol_h, at), 0.0
+                    )[0]
+                band, price = pricer(when)
+                self.ledger.add_energy(key, when.date(), band, kwh, price * grid)
+                device_hours[at] = device_hours.get(at, 0.0) + kwh
+            for day_start, kwh in day_rows:
+                if day_start.astimezone(dt_util.UTC) >= start:
+                    continue
+                day = day_start.date()
+                grid = 1.0
+                if day in imp_d:
+                    grid = solar_split(
+                        imp_d[day], exp_d.get(day, 0.0), sol_d.get(day, 0.0), 0.0
+                    )[0]
+                band, price = pricer(day_start.replace(hour=12))
+                self.ledger.add_energy(key, day, band, kwh, price * grid)
+
+        if restored or not imp_h:
+            # The untracked rest can't be rebuilt without every device's hourly usage:
+            # keep what was booked live, and continue live from the same point.
+            self._settle_from[UNTRACKED_KEY] = restored_from
+            if self._stored_ledger is not None:
+                for table in ("days", "totals"):
+                    saved_table = getattr(self._stored_ledger, table)
+                    if UNTRACKED_KEY in saved_table:
+                        getattr(self.ledger, table)[UNTRACKED_KEY] = saved_table[
+                            UNTRACKED_KEY
+                        ]
+            return
+        self._settle_from[UNTRACKED_KEY] = start
+        for at, (when, imported) in imp_h.items():
+            if at >= start:
+                continue
+            grid, rest = solar_split(
+                imported, value(exp_h, at), value(sol_h, at), device_hours.get(at, 0.0)
+            )
+            if rest > 0:
+                band, price = self._import_price(when)
+                self.ledger.add_energy(
+                    UNTRACKED_KEY, when.date(), band, rest, price * grid
+                )
+
+    def _settle(self, now: datetime) -> bool:
+        """Price device and untracked usage of every finished hour.
+
+        Readings are buffered in the slot they arrive in, so an hour is complete once it
+        has ended (plus a short delay). An hour in which the import meter was offline is
+        held and priced together with the hour its readings return in, because that hour
+        carries the import the meter missed. Returns whether anything was booked.
+        """
+        if not self.solar_mode or self._settled_through is None:
+            return False
+        now_utc = now.astimezone(dt_util.UTC)
+        cutoff = now_utc - SETTLE_DELAY
+        slots: dict[datetime, dict[datetime, dict[str, float]]] = {}
+        for key in (*self._device_keys, "import", "export", SOLAR_KEY):
+            for slot, kwh in self._pending_energy.get(key, {}).items():
+                at = dt_util.parse_datetime(slot)
+                if at is None:
+                    continue
+                at = at.astimezone(dt_util.UTC)
+                hour = _hour_floor(at)
+                if hour >= self._settled_through:
+                    cell = slots.setdefault(hour, {}).setdefault(at, {})
+                    cell[key] = cell.get(key, 0.0) + kwh
+        booked = False
+        group: list[datetime] = []
+        hour = self._settled_through
+        while hour + HOUR <= cutoff:
+            group.append(hour)
+            outage = self._import_gaps.get(hour.isoformat(), False)
+            # A gap is held for the meter to return, unless the buffer would expire first.
+            if outage and group[0] > now_utc - PENDING_RETENTION + 2 * HOUR:
+                hour += HOUR
+                continue
+            self._book_hours(group, slots, grid_known=not outage)
+            booked = True
+            hour += HOUR
+            group = []
+            self._settled_through = hour
+        for gap in list(self._import_gaps):
+            at = dt_util.parse_datetime(gap)
+            if at is None or at < now_utc - PENDING_RETENTION:
+                del self._import_gaps[gap]
+        return booked
+
+    def _book_hours(
+        self,
+        hours: list[datetime],
+        slots: dict[datetime, dict[datetime, dict[str, float]]],
+        *,
+        grid_known: bool,
+    ) -> None:
+        """Book one hour, or an outage plus the hour the import meter came back in.
+
+        Each slot is priced at its own local tariff band (a UTC hour can span two bands
+        where the time zone is offset by half an hour). Untracked usage gets exactly what
+        is left of the import cost booked for the same slots, so the parts add up.
+        """
+        cells = sorted(
+            (at, cell) for hour in hours for at, cell in slots.get(hour, {}).items()
+        )
+
+        def total(key: str) -> float:
+            return sum(cell.get(key, 0.0) for _at, cell in cells)
+
+        def priced(key: str) -> list[tuple[datetime, str, float, float]]:
+            """(local time, band, price, kWh) per slot this key is priced live for."""
+            since = self._settle_from.get(key, hours[0])
+            rows = []
+            for at, cell in cells:
+                kwh = cell.get(key, 0.0)
+                if kwh > 0 and _hour_floor(at) >= since:
+                    when = dt_util.as_local(at)
+                    band, price = self._import_price(when)
+                    rows.append((when, band, price, kwh))
+            return rows
+
+        devices = {key: total(key) for key in self._device_keys}
+        if not grid_known:
+            # Import unknown: never assume solar paid. Remember what the devices paid,
+            # because the import lump that arrives later also covers these hours.
+            for key in self._device_keys:
+                for when, band, price, kwh in priced(key):
+                    self.ledger.add_energy(key, when.date(), band, kwh, price)
+                    self._forced[0] += kwh
+                    self._forced[1] += kwh * price
+            return
+        forced_kwh, forced_cost = self._forced
+        self._forced = [0.0, 0.0]
+        grid, rest = solar_split(
+            max(total("import") - forced_kwh, 0.0),
+            total("export"),
+            total(SOLAR_KEY),
+            sum(devices.values()),
+        )
+        import_cost = 0.0
+        for at, cell in cells:
+            if (kwh := cell.get("import", 0.0)) > 0:
+                import_cost += kwh * self._import_price(dt_util.as_local(at))[1]
+        device_cost = 0.0
+        for key in self._device_keys:
+            for when, band, price, kwh in priced(key):
+                self.ledger.add_energy(key, when.date(), band, kwh, price * grid)
+                device_cost += kwh * price * grid
+        last = hours[-1]
+        if rest > 0 and last >= self._settle_from.get(UNTRACKED_KEY, hours[0]):
+            when = dt_util.as_local(last)
+            band, _price = self._import_price(when)
+            cost = max(import_cost - forced_cost - device_cost, 0.0)
+            self.ledger.add_energy(UNTRACKED_KEY, when.date(), band, rest, cost / rest)
+
+    def _note_import(self, when: datetime, *, online: bool) -> None:
+        """Record an import outage, or the meter reporting again in an outage hour."""
+        hour = _hour_floor(when.astimezone(dt_util.UTC)).isoformat()
+        if not online:
+            self._import_gaps[hour] = True
+        elif hour in self._import_gaps:
+            self._import_gaps[hour] = False
+
+    @property
+    def device_pricing(self) -> str:
+        """How tracked devices are priced: at the grid share, or at the full import rate."""
+        return "solar_share" if self.solar_mode else "import_rate"
 
     def _remember_increment(self, source: str, when: datetime, amount: float) -> None:
         """Aggregate live increments into five-minute buckets, bounded to one day."""
@@ -555,8 +894,37 @@ class TariffRuntime:
                 type(err).__name__,
             )
 
+    def _load_solar_progress(self, stored: dict[str, Any], now: datetime) -> None:
+        """Where live solar pricing stopped, and which hours had no import reading."""
+        through = dt_util.parse_datetime(str(stored.get("solar_settled_through", "")))
+        if through is not None and through.tzinfo is not None and through <= now:
+            self._saved_settled_through = through.astimezone(dt_util.UTC)
+        forced = stored.get("solar_forced", [0.0, 0.0])
+        if (
+            isinstance(forced, list)
+            and len(forced) == 2
+            and all(
+                isinstance(v, (int, float)) and math.isfinite(v) and v >= 0
+                for v in forced
+            )
+        ):
+            self._forced = [float(forced[0]), float(forced[1])]
+        gaps = stored.get("import_gaps", {})
+        if isinstance(gaps, dict):
+            self._import_gaps = {
+                str(hour): bool(still_offline)
+                for hour, still_offline in gaps.items()
+                if dt_util.parse_datetime(str(hour))
+            }
+
     def _snapshot(self) -> dict:
         data = self.ledger.to_dict()
+        if self._settled_through is not None:
+            data["solar_settled_through"] = self._settled_through.isoformat()
+        if self._import_gaps:
+            data["import_gaps"] = dict(self._import_gaps)
+        if any(self._forced):
+            data["solar_forced"] = list(self._forced)
         data["demand_signature"] = self._signature()
         data["history_start"] = self._history_start.isoformat()
         data["pending_energy"] = {
@@ -613,10 +981,13 @@ class TariffRuntime:
         entity = event.data["entity_id"]
         state = event.data.get("new_state")
         value = energy_value(state)
-        if value is None or entity not in self._sources:
+        watched = self._watched()
+        if self.solar_mode and entity == self.import_entity:
+            self._note_import(dt_util.now(), online=value is not None)
+        if value is None or entity not in watched:
             async_dispatcher_send(self.hass, signal_update(self.entry_id))
             return
-        key, pricer = self._sources[entity]
+        key, pricer = watched[entity]
         now = dt_util.now()
         self._ensure_today(now.date())
         old_state = event.data.get("old_state")
@@ -627,7 +998,10 @@ class TariffRuntime:
             and old_state.attributes.get("last_reset") != last_reset
         )
         plan = self.timeline.plan_on(now.date())
-        if key == "export" and plan.export_daily_cap:
+        if pricer is None or (self.solar_mode and key in self._device_keys):
+            # Solar is only an input; devices are priced per slot by `_settle`.
+            delta = self.ledger.reading_delta(key, value, reset_on_decrease=reset)
+        elif key == "export" and plan.export_daily_cap:
             delta = self.ledger.reading_delta(key, value, reset_on_decrease=reset)
             book_export_day(self.ledger, key, now.date(), delta, plan)
         else:
@@ -640,10 +1014,17 @@ class TariffRuntime:
     def _on_tick(self, _now: Any) -> None:
         if self._stopping:
             return
-        today = dt_util.now().date()
+        now = dt_util.now()
+        today = now.date()
         self._ensure_today(today)
+        if (
+            self.solar_mode
+            and energy_value(self.hass.states.get(self.import_entity)) is None
+        ):
+            self._note_import(now, online=False)
+        self._settle(now)
         self.ledger.prune(today)
-        self._prune_pending(dt_util.now())
+        self._prune_pending(now)
         self._store.async_delay_save(self._snapshot, SAVE_DELAY_SECONDS)
         async_dispatcher_send(self.hass, signal_update(self.entry_id))
 

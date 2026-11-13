@@ -707,6 +707,47 @@ def test_link_sensor_supports_grid_sources_from_older_home_assistant_releases():
     assert "stat_cost" not in sources[0]
 
 
+async def test_solar_sensor_is_validated_saved_and_cleared(hass):
+    solar = "sensor.flow_solar"
+    hass.states.async_set(solar, "5", ATTRS)
+    entry = await _entry(hass)
+    options = copy.deepcopy(dict(entry.options))
+
+    for taken in (IMPORT, EXPORT, DEVICE, "sensor.missing"):
+        result = await _options(hass, entry, "solar")
+        assert result["type"] is FlowResultType.FORM
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"solar_entity": taken}
+        )
+        assert result["errors"] == {"solar_entity": "invalid_energy_sensor"}
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"solar_entity": solar}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options == {**options, "solar_entity": solar}
+
+    # The solar meter can no longer be priced as a tracked device.
+    result = await _options(hass, entry, "devices")
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"tracked_devices": [solar]}
+    )
+    assert result["errors"] == {"tracked_devices": "invalid_energy_sensor"}
+
+    result = await _options(hass, entry, "solar")
+    assert result["data_schema"].schema
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options == options
+
+
+async def test_solar_pricing_needs_an_export_meter(hass):
+    entry = await _entry(hass, export=False)
+    result = await _options(hass, entry, "solar")
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "solar_needs_export_meter"
+
+
 async def test_incomplete_tariff_flow_cannot_finish():
     with pytest.raises(NotImplementedError):
         await _TariffStepsMixin()._async_finish()
