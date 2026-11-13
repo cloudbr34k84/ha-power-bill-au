@@ -80,6 +80,29 @@ is not charged to the device; on most current feed-in rates it is a few cents pe
 daily charges, demand charges and export credits stay as their own lines and are not split
 between devices.
 
+### Cost per mode
+
+Link a tracked device to the entity whose state is its mode in **Configure > Modes**: an
+air conditioner (climate), a water heater or a select. Each mode then gets cost and energy
+sensors for today, month to date and in total, for example "Izone Circuit EM Clamp Energy
+Cool cost month to date". A climate entity's `heat_cool` is shown as Heat/Cool.
+
+- Each reading from the meter is booked to the mode in force when it arrives. While the
+  mode entity is unavailable, the last known mode is kept.
+- Mode costs are split from the device's own cost (with solar pricing, by each mode's share
+  of the device's energy in the hour), so the modes add up to the device.
+- The recorder keeps states for about a week, so linking a device fills in the last seven
+  days. Earlier usage is not split, and the `since` attribute shows where the split starts.
+- From then on the integration keeps each hour's mode split permanently, in its own
+  storage, so rate changes still reprice past mode costs. Readings recorded live always
+  take priority over the recorder's history.
+- That record cannot be rebuilt from the recorder. It is deleted when you unlink the
+  device, stop tracking it, link it to a different mode entity, or remove the contract.
+  Renaming the mode entity keeps it.
+- Sensors are created for every mode the entity offers, and for a new mode the first time
+  it is seen. They stay when the mode entity is temporarily missing, for example while its
+  integration is still loading.
+
 ### Using it in the Energy dashboard
 
 In **Settings > Dashboards > Energy > Grid**, pick these two sensors. Only the lifetime
@@ -157,6 +180,7 @@ Settings → Devices & Services → HA Power Bill AU → Configure:
   new plan. Earlier usage keeps the plan it was recorded under.
 - **Demand charge** if your plan charges for your highest kW each month.
 - **Stepped feed-in** if your solar feed-in tariff pays a higher rate for the first kWh each day.
+- **Modes** to split a tracked device's cost by mode. See [Cost per mode](#cost-per-mode).
 - **Solar** to price tracked devices by what they took from the grid. See
   [What your devices really cost](#what-your-devices-really-cost-solar).
 - **Add to the Energy dashboard** to select the lifetime cost and credit sensors for your
@@ -241,6 +265,8 @@ two rates and the number of kWh per day that step 1 covers. If your bill has one
   from the upgrade.
 - The solar sensor is not followed through an entity ID rename. If it is renamed or goes
   offline, devices fall back to the full import rate until you select it again.
+- Cost per mode follows the mode entity's state only. A climate entity in Auto is not split
+  into heating and cooling, and a mode change takes effect with the next meter reading.
 - A battery is not modelled: its charging and discharging would need to be in the balance.
 
 ## Removal
@@ -292,6 +318,7 @@ ha-power-bill-au/
 │       ├── const.py
 │       ├── diagnostics.py
 │       ├── energy_dashboard.py
+│       ├── modes.py
 │       ├── engine.py
 │       ├── runtime.py
 │       ├── sensor.py
@@ -311,8 +338,8 @@ The integration folder and manifest domain must both remain `ha_power_bill_au`.
 
 ### Release versions
 
-The current manifest version is `0.3.1` in
-`custom_components/ha_power_bill_au/manifest.json`. The matching release tag is `v0.3.1`; the manifest value has no `v` prefix.
+The current manifest version is `0.4.0` in
+`custom_components/ha_power_bill_au/manifest.json`. The matching release tag is `v0.4.0`; the manifest value has no `v` prefix.
 For later releases, update the manifest and [CHANGELOG.md](CHANGELOG.md) before tagging:
 `0.1.1` for a patch, `0.2.0` for a feature release during initial development, and `1.0.0`
 for the first stable release. Never reuse a published version number.

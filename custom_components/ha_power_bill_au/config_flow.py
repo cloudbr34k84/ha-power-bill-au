@@ -22,12 +22,14 @@ from homeassistant.config_entries import (
     OptionsFlowWithReload,
 )
 from homeassistant.core import callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import selector
 
 from . import TariffConfigEntry
 from .const import (
     CONF_DAILY_MEMBERSHIP,
     CONF_DAILY_SUPPLY,
+    CONF_DEVICE_MODES,
     CONF_EXPORT_BANDS,
     CONF_EXPORT_ENTITY,
     CONF_IMPORT_BANDS,
@@ -43,10 +45,18 @@ from .const import (
 )
 from .energy_dashboard import ADD, BLOCKED, DONE, async_plan, async_save
 from .engine import Band, validate_bands
-from .sources import meter_pair, prepare_sources
+from .sources import meter_pair, prepare_sources, source_record
 from .validation import valid_energy_sensor
 
 BAND_COUNT = 3
+# Entities whose state is a device's mode.
+MODE_DOMAINS = ("climate", "water_heater", "select", "input_select")
+
+
+def _display_name(hass: Any, entity_id: str) -> str:
+    state = hass.states.get(entity_id)
+    name = state.attributes.get("friendly_name") if state else None
+    return f"{name} ({entity_id})" if name else entity_id
 
 
 def _number(
@@ -381,8 +391,95 @@ class EnergyTariffCostOptionsFlow(_TariffStepsMixin, OptionsFlowWithReload):
                 "feed_in",
                 "devices",
                 "solar",
+                "modes",
                 "energy_dashboard",
             ],
+        )
+
+    async def async_step_modes(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Choose the tracked device to link to a mode entity."""
+        data, options = prepare_sources(
+            self.hass, self.config_entry.data, self.config_entry.options
+        )
+        devices = list(options.get(CONF_TRACKED_DEVICES) or [])
+        if not devices:
+            return self.async_abort(reason="no_tracked_devices")
+        if user_input is not None:
+            self._mode_device = user_input["device"]
+            return await self.async_step_mode_entity()
+        return self.async_show_form(
+            step_id="modes",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("device", default=devices[0]): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                selector.SelectOptionDict(
+                                    value=entity_id,
+                                    label=_display_name(self.hass, entity_id),
+                                )
+                                for entity_id in devices
+                            ],
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    )
+                }
+            ),
+        )
+
+    async def async_step_mode_entity(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Link the device to the entity whose state is its mode, or unlink it."""
+        data, _options = prepare_sources(
+            self.hass, self.config_entry.data, self.config_entry.options
+        )
+        ledger_key = source_record(data, self._mode_device)["ledger_key"]
+        links = dict(self.config_entry.options.get(CONF_DEVICE_MODES) or {})
+        registry = er.async_get(self.hass)
+        current = links.get(ledger_key, {}).get("entity_id")
+        if (registry_id := links.get(ledger_key, {}).get("registry_id")) and (
+            registered := registry.async_get(registry_id)
+        ):
+            current = registered.entity_id
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            mode_entity = user_input.get("mode_entity") or None
+            if mode_entity is None:
+                links.pop(ledger_key, None)
+            elif mode_entity.split(".", 1)[0] not in MODE_DOMAINS or (
+                self.hass.states.get(mode_entity) is None
+            ):
+                errors["mode_entity"] = "invalid_mode_entity"
+            else:
+                registered = registry.async_get(mode_entity)
+                links[ledger_key] = {
+                    "entity_id": mode_entity,
+                    "registry_id": registered.id if registered else None,
+                }
+            if not errors:
+                new = self._options_data()
+                new[CONF_DEVICE_MODES] = links
+                if not links:
+                    new.pop(CONF_DEVICE_MODES)
+                return self.async_create_entry(title="", data=new)
+        return self.async_show_form(
+            step_id="mode_entity",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        "mode_entity", description={"suggested_value": current}
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(domain=list(MODE_DOMAINS))
+                    ),
+                }
+            ),
+            description_placeholders={
+                "device": _display_name(self.hass, self._mode_device)
+            },
+            errors=errors,
         )
 
     async def async_step_solar(
@@ -498,6 +595,18 @@ class EnergyTariffCostOptionsFlow(_TariffStepsMixin, OptionsFlowWithReload):
             self.hass.config_entries.async_update_entry(
                 self.config_entry, data=entry_data
             )
+            # A device that is no longer tracked loses its mode link with its history.
+            tracked = {
+                source_record(entry_data, device)["ledger_key"] for device in devices
+            }
+            links = {
+                key: link
+                for key, link in data.get(CONF_DEVICE_MODES, {}).items()
+                if key in tracked
+            }
+            data.pop(CONF_DEVICE_MODES, None)
+            if links:
+                data[CONF_DEVICE_MODES] = links
         return data
 
     async def async_step_devices(

@@ -25,6 +25,7 @@ CONF_RATES_INCLUDE_GST = "rates_include_gst"
 CONF_DAILY_SUPPLY = "daily_supply"
 CONF_DAILY_MEMBERSHIP = "daily_membership"
 CONF_TRACKED_DEVICES = "tracked_devices"
+CONF_DEVICE_MODES = "device_modes"  # device ledger key -> its mode entity
 CONF_SOLAR_ENTITY = "solar_entity"  # optional: prices tracked devices at the grid share
 CONF_PLANS = "plans"  # optional list of dated plans; see runtime.build_timeline
 CONF_SOURCES = "sources"  # persistent source identities and legacy sensor/ledger keys
@@ -36,6 +37,11 @@ def provider_name(data: Mapping[str, Any]) -> str:
         str(data.get(CONF_PROVIDER) or data.get(CONF_NAME) or "Electricity").strip()
         or "Electricity"
     )
+
+
+def signal_modes(entry_id: str) -> str:
+    """Dispatcher signal sent when a linked device has a mode without sensors yet."""
+    return f"{DOMAIN}_modes_{entry_id}"
 
 
 def signal_update(entry_id: str) -> str:

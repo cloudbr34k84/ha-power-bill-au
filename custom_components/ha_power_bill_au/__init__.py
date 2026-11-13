@@ -21,6 +21,7 @@ from homeassistant.helpers.storage import Store
 from sqlalchemy.exc import SQLAlchemyError
 
 from .const import (
+    CONF_DEVICE_MODES,
     CONF_EXPORT_ENTITY,
     CONF_IMPORT_ENTITY,
     CONF_SOURCES,
@@ -94,6 +95,41 @@ def _async_track_sources(hass: HomeAssistant, entry: TariffConfigEntry) -> None:
     entry.async_on_unload(
         async_track_entity_registry_updated_event(hass, entities, source_changed)
     )
+
+    @callback
+    def mode_entity_changed(event: Event) -> None:
+        """A linked mode entity was renamed or removed: follow it by registry ID."""
+        renamed = event.data["action"] == "update" and "entity_id" in event.data.get(
+            "changes", {}
+        )
+        if renamed and (
+            registered := er.async_get(hass).async_get(event.data["entity_id"])
+        ):
+            # Keep the stored entity ID current, for when the registry entry is gone.
+            links = {
+                key: (
+                    {**link, "entity_id": registered.entity_id}
+                    if isinstance(link, dict)
+                    and link.get("registry_id") == registered.id
+                    else link
+                )
+                for key, link in entry.options.get(CONF_DEVICE_MODES, {}).items()
+            }
+            hass.config_entries.async_update_entry(
+                entry, options={**entry.options, CONF_DEVICE_MODES: links}
+            )
+        if renamed or event.data["action"] != "update":
+            hass.config_entries.async_schedule_reload(entry.entry_id)
+
+    mode_entities = sorted(
+        {mode for _key, mode in entry.runtime_data.mode_links().values()}
+    )
+    if mode_entities:
+        entry.async_on_unload(
+            async_track_entity_registry_updated_event(
+                hass, mode_entities, mode_entity_changed
+            )
+        )
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: TariffConfigEntry) -> bool:

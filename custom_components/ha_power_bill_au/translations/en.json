@@ -213,7 +213,8 @@
           "feed_in": "Stepped feed-in (a higher rate for the first kWh each day)",
           "devices": "Tracked devices (extra cost sensors)",
           "energy_dashboard": "Add to the Energy dashboard",
-          "solar": "Solar (price devices by what they took from the grid)"
+          "solar": "Solar (price devices by what they took from the grid)",
+          "modes": "Modes (cost per mode for a tracked device)"
         }
       },
       "demand": {
@@ -303,6 +304,26 @@
         "data_description": {
           "solar_entity": "Cumulative solar energy produced, in Wh, kWh or MWh, for example the inverter's total energy. It must be different from the import, export and tracked meters."
         }
+      },
+      "modes": {
+        "title": "Cost per mode",
+        "description": "Choose a tracked device to split its cost and energy by mode, for example an air conditioner's cool, heat and dry.",
+        "data": {
+          "device": "Tracked device"
+        },
+        "data_description": {
+          "device": "The tracked energy meter whose usage is split by mode."
+        }
+      },
+      "mode_entity": {
+        "title": "Mode entity",
+        "description": "Choose the entity whose state is the mode of **{device}**: an air conditioner (climate), a water heater or a select.\n\nEach reading from the meter is booked to the mode in force at the time, and the last known mode is kept while the entity is unavailable. The last week is filled in from the recorder's history; older usage is not split.\n\nLeave the field empty to stop splitting this device by mode.",
+        "data": {
+          "mode_entity": "Mode entity"
+        },
+        "data_description": {
+          "mode_entity": "A climate, water heater or select entity whose state names the mode."
+        }
       }
     },
     "error": {
@@ -319,7 +340,8 @@
       "invalid_provider": "Enter the name of your energy provider.",
       "invalid_amount": "Amounts must be finite numbers greater than or equal to zero.",
       "invalid_energy_sensor": "Choose a cumulative energy sensor in Wh, kWh or MWh with state class total or total_increasing. Use a different meter for each role.",
-      "invalid_date": "Enter a valid date as YYYY-MM-DD."
+      "invalid_date": "Enter a valid date as YYYY-MM-DD.",
+      "invalid_mode_entity": "Choose an existing climate, water heater or select entity."
     },
     "abort": {
       "no_export_meter": "This plan has no feed-in band. Set up an export meter first.",
@@ -329,7 +351,8 @@
       "energy_cost_configured": "Your grid meter in the Energy dashboard already has a different cost sensor or a price set. Nothing was changed. To use this contract instead, clear that setting in Settings > Dashboards > Energy, then run this again.",
       "energy_no_grid_source": "The Energy dashboard has no grid source using this contract's meters. Add the import meter (and export meter) under Settings > Dashboards > Energy first, then run this again. Nothing was changed.",
       "energy_not_loaded": "The Energy dashboard is not enabled in this Home Assistant. Nothing was changed.",
-      "solar_needs_export_meter": "Solar pricing needs an export meter, because the solar your house used is the production minus what was exported. Set up a contract with an export meter first."
+      "solar_needs_export_meter": "Solar pricing needs an export meter, because the solar your house used is the production minus what was exported. Set up a contract with an export meter first.",
+      "no_tracked_devices": "Add a tracked device first (Configure > Tracked devices), then link it to a mode."
     }
   }
 }

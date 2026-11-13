@@ -748,6 +748,136 @@ async def test_solar_pricing_needs_an_export_meter(hass):
     assert result["reason"] == "solar_needs_export_meter"
 
 
+async def test_a_tracked_device_is_linked_to_a_mode_entity_and_unlinked(hass):
+    registry = er.async_get(hass)
+    climate = registry.async_get_or_create(
+        "climate", "test", "ac", suggested_object_id="flow_ac"
+    ).entity_id
+    hass.states.async_set(climate, "cool", {"friendly_name": "AC"})
+    hass.states.async_set("select.flow_mode", "eco")
+    entry = await _entry(hass)
+    options = copy.deepcopy(dict(entry.options))
+
+    result = await _options(hass, entry, "modes")
+    assert result["type"] is FlowResultType.FORM
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"device": DEVICE}
+    )
+    assert result["step_id"] == "mode_entity"
+    assert DEVICE in result["description_placeholders"]["device"]
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"mode_entity": "climate.missing"}
+    )
+    assert result["errors"] == {"mode_entity": "invalid_mode_entity"}
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"mode_entity": climate}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    registry_id = registry.async_get(climate).id
+    assert entry.options == {
+        **options,
+        "device_modes": {DEVICE: {"entity_id": climate, "registry_id": registry_id}},
+    }
+
+    # The link follows the mode entity through a rename, and can be changed.
+    registry.async_update_entity(climate, new_entity_id="climate.flow_renamed")
+    hass.states.async_set("climate.flow_renamed", "cool")
+    result = await _options(hass, entry, "modes")
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"device": DEVICE}
+    )
+    suggested = [
+        key.description["suggested_value"] for key in result["data_schema"].schema
+    ]
+    assert suggested == ["climate.flow_renamed"]
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"mode_entity": "select.flow_mode"}
+    )
+    assert entry.options["device_modes"] == {
+        DEVICE: {"entity_id": "select.flow_mode", "registry_id": None}
+    }
+
+    result = await _options(hass, entry, "modes")
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"device": DEVICE}
+    )
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options == options
+
+
+async def test_mode_links_are_kept_per_device_under_its_ledger_key(hass):
+    hass.states.async_set("climate.flow_ac", "cool")
+    entry = await _entry(hass)
+    # A device whose ledger key is not its entity ID (it was renamed), and another link.
+    sources = copy.deepcopy(dict(entry.data[CONF_SOURCES]))
+    for record in sources.values():
+        if record["entity_id"] == DEVICE:
+            record["ledger_key"] = "sensor.flow_device_before_rename"
+    other = {"entity_id": "climate.other", "registry_id": None}
+    hass.config_entries.async_update_entry(
+        entry,
+        data={**entry.data, CONF_SOURCES: sources},
+        options={**entry.options, "device_modes": {"sensor.other_meter": other}},
+    )
+
+    result = await _options(hass, entry, "modes")
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"device": DEVICE}
+    )
+    # Only climate, water heater and select entities can be a mode.
+    result = await _defensive_submit(
+        hass.config_entries.options, result, {"mode_entity": IMPORT}
+    )
+    assert result["errors"] == {"mode_entity": "invalid_mode_entity"}
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"mode_entity": "climate.flow_ac"}
+    )
+    assert entry.options["device_modes"] == {
+        "sensor.other_meter": other,
+        "sensor.flow_device_before_rename": {
+            "entity_id": "climate.flow_ac",
+            "registry_id": None,
+        },
+    }
+
+    result = await _options(hass, entry, "modes")
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"device": DEVICE}
+    )
+    await hass.config_entries.options.async_configure(result["flow_id"], {})
+    assert entry.options["device_modes"] == {"sensor.other_meter": other}
+
+    # Untracking a device removes its link; links of devices not tracked go too.
+    result = await _options(hass, entry, "modes")
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"device": DEVICE}
+    )
+    await hass.config_entries.options.async_configure(
+        result["flow_id"], {"mode_entity": "climate.flow_ac"}
+    )
+    result = await _options(hass, entry, "devices")
+    await hass.config_entries.options.async_configure(
+        result["flow_id"], {"tracked_devices": [DEVICE]}
+    )
+    assert list(entry.options["device_modes"]) == ["sensor.flow_device_before_rename"]
+    result = await _options(hass, entry, "devices")
+    await hass.config_entries.options.async_configure(
+        result["flow_id"], {"tracked_devices": []}
+    )
+    assert "device_modes" not in entry.options
+
+
+async def test_modes_need_a_tracked_device(hass):
+    entry = await _entry(hass)
+    hass.config_entries.async_update_entry(
+        entry, options={**entry.options, "tracked_devices": []}
+    )
+    result = await _options(hass, entry, "modes")
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "no_tracked_devices"
+
+
 async def test_incomplete_tariff_flow_cannot_finish():
     with pytest.raises(NotImplementedError):
         await _TariffStepsMixin()._async_finish()

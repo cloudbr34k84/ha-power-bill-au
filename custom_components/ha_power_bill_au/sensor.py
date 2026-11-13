@@ -17,7 +17,7 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
@@ -25,8 +25,9 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import TariffConfigEntry
-from .const import DOMAIN, provider_name, signal_update
+from .const import DOMAIN, provider_name, signal_modes, signal_update
 from .engine import UNTRACKED_KEY
+from .modes import mode_slug, pretty_modes
 from .runtime import TariffRuntime
 
 
@@ -96,15 +97,26 @@ def _lifetime(
 
 
 def _kwh(
-    key: str, name: str, fn: Callable[[TariffRuntime], Any], *, source: str
+    key: str,
+    name: str,
+    fn: Callable[[TariffRuntime], Any],
+    *,
+    source: str,
+    lifetime: bool = False,
 ) -> TariffSensorDescription:
-    """kWh in a band for today or the month to date. Resets each period, like a utility meter."""
+    """kWh for today or the month to date, which reset each period like a utility meter.
+
+    A lifetime value is rebuilt from history on every start and may be corrected
+    downwards, so it is a plain total: a fall must not be read as a meter reset.
+    """
     return TariffSensorDescription(
         key=key,
         name=name,
         native_unit_of_measurement="kWh",
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL_INCREASING,
+        state_class=(
+            SensorStateClass.TOTAL if lifetime else SensorStateClass.TOTAL_INCREASING
+        ),
         suggested_display_precision=2,
         value_fn=fn,
         source=source,
@@ -128,6 +140,69 @@ def _device_label(hass: HomeAssistant, entity_id: str) -> str | None:
     return (
         f"{device_name} {entry.original_name}" if entry.original_name else device_name
     )
+
+
+def _mode_descriptions(rt: TariffRuntime) -> list[TariffSensorDescription]:
+    """Cost and energy per mode for every tracked meter linked to a mode entity."""
+    out: list[TariffSensorDescription] = []
+    for device, (key, _mode_entity) in rt.mode_links().items():
+        base = _device_label(rt.hass, device)
+        if base is None:
+            state = rt.hass.states.get(device)
+            base = (state and state.attributes.get("friendly_name")) or (
+                device.split(".", 1)[-1].replace("_", " ").capitalize()
+            )
+        sensor_key = rt.device_sensor_key(device)
+
+        def attrs(r: TariffRuntime, k: str = key) -> dict[str, Any]:
+            return {"pricing": r.device_pricing, "since": r.mode_since(k)}
+
+        modes = rt.mode_names(key)
+        pretty_names = pretty_modes(modes)
+        for mode in modes:
+            pretty = pretty_names[mode]
+            stem = f"{sensor_key}_mode_{mode_slug(mode)}"
+            for scope, label in (("today", "today"), ("month", "month to date")):
+                out.append(
+                    _money(
+                        f"{stem}_cost_{scope}",
+                        f"{base} {pretty} cost {label}",
+                        lambda r, k=key, m=mode, s=scope: r.mode_values(k, m)[
+                            f"cost_{s}"
+                        ],
+                        source=device,
+                        attrs_fn=attrs,
+                    )
+                )
+                out.append(
+                    _kwh(
+                        f"{stem}_kwh_{scope}",
+                        f"{base} {pretty} energy {label}",
+                        lambda r, k=key, m=mode, s=scope: r.mode_values(k, m)[
+                            f"kwh_{s}"
+                        ],
+                        source=device,
+                    )
+                )
+            out.append(
+                _lifetime(
+                    f"{stem}_cost_total",
+                    f"{base} {pretty} cost total",
+                    lambda r, k=key, m=mode: r.mode_values(k, m)["cost_total"],
+                    source=device,
+                    attrs_fn=attrs,
+                )
+            )
+            out.append(
+                _kwh(
+                    f"{stem}_kwh_total",
+                    f"{base} {pretty} energy total",
+                    lambda r, k=key, m=mode: r.mode_values(k, m)["kwh_total"],
+                    source=device,
+                    lifetime=True,
+                )
+            )
+    return out
 
 
 def _slug(text: str) -> str:
@@ -284,6 +359,7 @@ def _descriptions(rt: TariffRuntime) -> list[TariffSensorDescription]:
                 attrs_fn=_pricing_attrs,
             ),
         ]
+    descriptions += _mode_descriptions(rt)
     if rt.solar_mode:
         # Everything the tracked devices don't account for, so the parts add up
         # to the grid import cost.
@@ -375,7 +451,22 @@ async def async_setup_entry(
         if entity.unique_id not in wanted:
             registry.async_remove(entity.entity_id)
 
+    added = {description.key for description in descriptions}
     async_add_entities(
         TariffSensor(entry.entry_id, runtime, description, name)
         for description in descriptions
+    )
+
+    @callback
+    def add_new_modes() -> None:
+        """A linked device ran in a mode that has no sensors yet."""
+        new = [d for d in _mode_descriptions(runtime) if d.key not in added]
+        added.update(d.key for d in new)
+        async_add_entities(
+            TariffSensor(entry.entry_id, runtime, description, name)
+            for description in new
+        )
+
+    entry.async_on_unload(
+        async_dispatcher_connect(hass, signal_modes(entry.entry_id), add_new_modes)
     )

@@ -9,15 +9,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+from bisect import bisect_left
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from typing import Any
 
 from homeassistant.components.recorder import get_instance
+from homeassistant.components.recorder.history import get_significant_states
 from homeassistant.components.recorder.statistics import statistics_during_period
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.core import Event, HomeAssistant, State, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import (
     async_track_state_change_event,
@@ -25,10 +28,12 @@ from homeassistant.helpers.event import (
 )
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
+from sqlalchemy.exc import SQLAlchemyError
 
 from .const import (
     CONF_DAILY_MEMBERSHIP,
     CONF_DAILY_SUPPLY,
+    CONF_DEVICE_MODES,
     CONF_EXPORT_BANDS,
     CONF_EXPORT_ENTITY,
     CONF_IMPORT_BANDS,
@@ -37,6 +42,7 @@ from .const import (
     CONF_RATES_INCLUDE_GST,
     CONF_SOLAR_ENTITY,
     CONF_TRACKED_DEVICES,
+    signal_modes,
     signal_update,
 )
 from .engine import (
@@ -57,12 +63,13 @@ from .engine import (
     solar_split,
     summarize,
 )
+from .modes import UNKNOWN_MODE, ModeTracker, hour_of, mode_key
 from .sources import source_record
 from .validation import energy_value
 
 _LOGGER = logging.getLogger(__name__)
 
-SAVE_DELAY_SECONDS = 30
+SAVE_DELAY_SECONDS = 60  # a change is on disk within a minute
 MAX_HOURLY_KWH = 30.0  # Residential meter spike filter; see README limitations.
 MAX_DAILY_KWH = 300.0
 HISTORY_EPOCH = datetime(1970, 1, 1, tzinfo=dt_util.UTC)
@@ -74,6 +81,7 @@ DEMAND_REFRESH = timedelta(minutes=5)
 PENDING_RETENTION = timedelta(days=1)
 SOLAR_KEY = "solar"
 HOUR = timedelta(hours=1)
+MODE_BACKFILL = timedelta(days=7)  # the recorder keeps states for about a week
 # An hour is priced once the readings that arrived just before it ended are in.
 SETTLE_DELAY = timedelta(minutes=2)
 
@@ -104,6 +112,18 @@ def _statistics_result(result: Any) -> dict[str, list[dict[str, Any]]]:
         else:
             raise HomeAssistantError("Recorder returned invalid statistics rows")
     return normalized
+
+
+def _mode_of(state: State | None) -> str | None:
+    """A mode entity's mode, or None while it is unavailable."""
+    if state is None or state.state in ("unavailable", "unknown", ""):
+        return None
+    return str(state.state)
+
+
+def _slot(when: datetime) -> str:
+    at = when.astimezone(dt_util.UTC)
+    return at.replace(minute=at.minute // 5 * 5, second=0, microsecond=0).isoformat()
 
 
 def _hour_floor(at: datetime) -> datetime:
@@ -205,6 +225,7 @@ class TariffRuntime:
         self._stored_ledger: UsageLedger | None = None
         self._demand_lock = asyncio.Lock()
         self._stopping = False
+        self._save_pending = False
         self._pending_energy: dict[str, dict[str, float]] = {}
         self._history_watermarks: dict[str, datetime] = {}
 
@@ -227,6 +248,29 @@ class TariffRuntime:
             for entity, (key, _pricer) in self._sources.items()
             if entity in self.device_entities
         }
+        # device ledger key -> the entity whose state is its mode (followed by registry ID)
+        self._mode_links: dict[str, str] = {}
+        self._mode_identity: dict[str, list[str]] = {}
+        registry = er.async_get(hass)
+        for key, link in (cfg.get(CONF_DEVICE_MODES) or {}).items():
+            if key not in self._device_keys or not isinstance(link, dict):
+                continue
+            entity_id = link.get("entity_id")
+            if (registry_id := link.get("registry_id")) and (
+                registered := registry.async_get(registry_id)
+            ):
+                entity_id = registered.entity_id
+            if isinstance(entity_id, str):
+                self._mode_links[key] = entity_id
+                self._mode_identity[key] = [
+                    str(identity)
+                    for identity in (link.get("registry_id"), entity_id)
+                    if identity
+                ]
+        self.modes = ModeTracker()
+        # Devices whose record was dropped because they were linked to another entity.
+        self._modes_reset: set[str] = set()
+        self._current_mode: dict[str, str] = {}
 
     def _import_price(self, when: datetime) -> tuple[str, float]:
         plan = self.timeline.plan_on(when.date())
@@ -249,6 +293,8 @@ class TariffRuntime:
         self.ledger = UsageLedger()
         stored = await self._store.async_load()
         if isinstance(stored, dict):
+            # Kept apart from the ledger: mode history can't be rebuilt if that is invalid.
+            self.modes = ModeTracker.from_dict(stored.get("modes"))
             try:
                 if "history_start" in stored:
                     self._history_start = min(
@@ -275,7 +321,21 @@ class TariffRuntime:
                 )
                 self._history_start = now.date()
                 self._stored_ledger = None
+        self.modes.keep_only(set(self._mode_links))
+        for key, identity in self._mode_identity.items():
+            if not self.modes.same_source(key, identity):
+                # Linked to a different entity: its modes mean something else.
+                self.modes.clear(key)
+                self._modes_reset.add(key)
+            self.modes.source[key] = identity
+            self._note_mode_names(key, self.hass.states.get(self._mode_links[key]))
+        # The hour HA stopped in, however long ago: its live readings come first.
+        self.modes.settle_loaded(now.astimezone(dt_util.UTC))
         recorder_ready = "recorder" in self.hass.config.components
+        if self._mode_links and recorder_ready:
+            await self._async_backfill_modes(now)
+        # Every finished hour is summarised before history is priced with it.
+        self._settle_modes(now, delay=timedelta(0))
         if self._estimating:
             if recorder_ready:
                 await self._async_scan_demand(DEMAND_SCAN_DAYS, reprice=False)
@@ -286,6 +346,19 @@ class TariffRuntime:
             peaks = self.ledger.demand_peaks
             self.ledger = self._stored_ledger
             self.ledger.demand_peaks = peaks
+            # Costs per mode of devices that are no longer linked to a mode.
+            linked = tuple(
+                mode_key(key, "")
+                for key in self._mode_links
+                if key not in self._modes_reset
+            )
+            for table in (self.ledger.days, self.ledger.totals):
+                for source in [
+                    s
+                    for s in table
+                    if s.startswith("mode|") and not s.startswith(linked)
+                ]:
+                    del table[source]
         # live baseline: readings from now on are added as they change
         for entity, (key, _pricer) in self._watched().items():
             value = energy_value(self.hass.states.get(entity))
@@ -303,6 +376,20 @@ class TariffRuntime:
             self._settle(now)
         self._ensure_today(now.date())
         self.ledger.prune(now.date())
+        for key, entity_id in self._mode_links.items():
+            self._current_mode[key] = (
+                _mode_of(self.hass.states.get(entity_id))
+                or self.modes.last.get(key)
+                or UNKNOWN_MODE
+            )
+        if self._mode_links:
+            self._unsubs.append(
+                async_track_state_change_event(
+                    self.hass,
+                    sorted(set(self._mode_links.values())),
+                    self._on_mode_change,
+                )
+            )
         self._unsubs.append(
             async_track_state_change_event(
                 self.hass, list(self._watched()), self._on_source_change
@@ -317,7 +404,7 @@ class TariffRuntime:
                     self.hass, self._on_demand_tick, DEMAND_REFRESH
                 )
             )
-        self._store.async_delay_save(self._snapshot, SAVE_DELAY_SECONDS)
+        self._request_save()
 
     async def _async_backfill(self, now: datetime) -> None:
         """Rebuild available meter history without installation-specific date boundaries."""
@@ -387,10 +474,15 @@ class TariffRuntime:
                     "No recorder rows for a configured energy source; using saved readings when available"
                 )
             if not hour_rows and not day_rows and self._stored_ledger is not None:
-                if key in self._stored_ledger.days:
-                    self.ledger.days[key] = self._stored_ledger.days[key]
-                if key in self._stored_ledger.totals:
-                    self.ledger.totals[key] = self._stored_ledger.totals[key]
+                for table in ("days", "totals"):
+                    saved = getattr(self._stored_ledger, table)
+                    for source in saved:
+                        if source == key or (
+                            key in self._mode_links
+                            and key not in self._modes_reset
+                            and source.startswith(mode_key(key, ""))
+                        ):
+                            getattr(self.ledger, table)[source] = saved[source]
                 continue
             ends = [
                 when.astimezone(dt_util.UTC) + timedelta(hours=1)
@@ -420,6 +512,12 @@ class TariffRuntime:
                     continue
                 hours.append((when, change))
             book_hourly(self.ledger, key, hours, pricer)
+            if key in self._mode_links:
+                for when, kwh in hours:
+                    band, price = pricer(when)
+                    self._book_modes(
+                        key, when, band, kwh, price, self._history_shares(key, when)
+                    )
             # Use daily-only history at the noon rate when no hourly detail exists.
             for day_start, change in day_rows:
                 plan = self.timeline.plan_on(day_start.date())
@@ -502,6 +600,15 @@ class TariffRuntime:
                 else:
                     band, rate = pricers[source](when)
                     self.ledger.add_energy(source, when.date(), band, amount, rate)
+                    if source in self._mode_links:
+                        self._book_modes(
+                            source,
+                            when,
+                            band,
+                            amount,
+                            rate,
+                            self.modes.slot_shares(source, timestamp),
+                        )
 
     def _watched(
         self,
@@ -636,6 +743,15 @@ class TariffRuntime:
                     grid = 1.0  # No import reading for this hour: assume the grid paid.
                 band, price = pricer(when)
                 self.ledger.add_energy(key, when.date(), band, kwh, price * grid)
+                if key in self._mode_links:
+                    self._book_modes(
+                        key,
+                        when,
+                        band,
+                        kwh,
+                        price * grid,
+                        self._history_shares(key, when),
+                    )
                 device_hours[at] = device_hours.get(at, 0.0) + kwh
                 note_day(when.date(), kwh, kwh * price * grid)
             for day_start, kwh in day_rows:
@@ -769,6 +885,7 @@ class TariffRuntime:
             for key in self._device_keys:
                 for when, band, price, kwh in priced(key):
                     self.ledger.add_energy(key, when.date(), band, kwh, price)
+                    self._book_slot_modes(key, when, band, kwh, price)
                     self._forced[0] += kwh
                     self._forced[1] += kwh * price
             return
@@ -788,6 +905,7 @@ class TariffRuntime:
         for key in self._device_keys:
             for when, band, price, kwh in priced(key):
                 self.ledger.add_energy(key, when.date(), band, kwh, price * grid)
+                self._book_slot_modes(key, when, band, kwh, price * grid)
                 device_cost += kwh * price * grid
         last = hours[-1]
         if rest > 0 and last >= self._settle_from.get(UNTRACKED_KEY, hours[0]):
@@ -803,6 +921,211 @@ class TariffRuntime:
             self._import_gaps[hour] = True
         elif hour in self._import_gaps:
             self._import_gaps[hour] = False
+
+    # ---- modes -----------------------------------------------------------------------------
+
+    @callback
+    def _on_mode_change(self, event: Event) -> None:
+        """Follow the mode; an unavailable mode entity keeps the last known mode."""
+        if self._stopping:
+            return
+        state = event.data.get("new_state")
+        mode = _mode_of(state)
+        grew = False
+        for key, entity_id in self._mode_links.items():
+            if entity_id == event.data["entity_id"]:
+                grew |= self._note_mode_names(key, state)
+                if mode is not None:
+                    self._current_mode[key] = mode
+        if grew:
+            async_dispatcher_send(self.hass, signal_modes(self.entry_id))
+
+    def _note_mode_names(self, key: str, state: State | None) -> bool:
+        """Remember the modes an entity offers, and the one it is in."""
+        names: list[str] = []
+        if state is not None:
+            for attribute in ("hvac_modes", "operation_list", "options"):
+                if isinstance(options := state.attributes.get(attribute), list):
+                    names.extend(str(option) for option in options)
+            if (mode := _mode_of(state)) is not None:
+                names.append(mode)
+        return self.modes.note_names(key, names)
+
+    def _settle_modes(self, now: datetime, *, delay: timedelta = SETTLE_DELAY) -> bool:
+        if not self._mode_links:
+            return False
+        now_utc = now.astimezone(dt_util.UTC)
+        changed = self.modes.settle(now_utc, delay=delay, retention=PENDING_RETENTION)
+        self.modes.prune(now_utc - PENDING_RETENTION)
+        return changed
+
+    def _history_shares(self, key: str, when: datetime) -> dict[str, float]:
+        return self.modes.stored_shares(key, hour_of(when.astimezone(dt_util.UTC)))
+
+    def _book_slot_modes(
+        self, key: str, when: datetime, band: str, kwh: float, price: float
+    ) -> None:
+        if key in self._mode_links:
+            slot = when.astimezone(dt_util.UTC).isoformat()
+            self._book_modes(
+                key, when, band, kwh, price, self.modes.slot_shares(key, slot)
+            )
+
+    def _book_modes(
+        self,
+        key: str,
+        when: datetime,
+        band: str,
+        kwh: float,
+        price: float,
+        shares: dict[str, float],
+    ) -> None:
+        """Split a device booking by mode. An hour with no known mode is not split."""
+        for mode, share in shares.items():
+            self.ledger.add_energy(
+                mode_key(key, mode), when.date(), band, kwh * share, price
+            )
+
+    async def _async_backfill_modes(self, now: datetime) -> None:
+        """Tag the last week's device energy with the mode the recorder saw at the time.
+
+        Live readings always win: within the buffer only slots without a live reading are
+        added, and older hours are only filled where none is stored.
+        """
+        now_utc = now.astimezone(dt_util.UTC)
+        start = now_utc - MODE_BACKFILL
+        buffered_from = ModeTracker.buffered_from(now_utc, PENDING_RETENTION)
+        devices = {key: entity for entity, (key, _p) in self._sources.items()}
+        links = {
+            key: (devices[key], mode_entity)
+            for key, mode_entity in self._mode_links.items()
+            if key in devices
+        }
+
+        def mode_at(changes: list[tuple[datetime, str]], end: datetime) -> str | None:
+            """The mode at a slot's last moment, as a live reading is tagged."""
+            index = bisect_left(changes, (end,)) - 1
+            return changes[index][1] if index >= 0 else None
+
+        timelines: dict[str, list[tuple[datetime, str]]] = {}
+
+        def fetch() -> dict[str, list[tuple[datetime, str, float]]]:
+            """(slot start, mode, kWh) per device, worked out off the event loop."""
+            states = get_significant_states(
+                self.hass,
+                start,
+                now_utc,
+                sorted({mode for _d, mode in links.values()}),
+                significant_changes_only=False,
+                no_attributes=True,
+            )
+            stats = _statistics_result(
+                statistics_during_period(
+                    self.hass,
+                    start,
+                    now_utc,
+                    {device for device, _m in links.values()},
+                    "5minute",
+                    {"energy": "Wh"},
+                    {"change"},
+                )
+            )
+            found: dict[str, list[tuple[datetime, str, float]]] = {}
+            for key, (device, mode_entity) in links.items():
+                changes: list[tuple[datetime, str]] = []  # real mode changes only
+                for state in states.get(mode_entity, []):
+                    if (
+                        not isinstance(state, State)
+                        or (mode := _mode_of(state)) is None
+                    ):
+                        continue
+                    if not changes or changes[-1][1] != mode:
+                        changes.append(
+                            (state.last_changed.astimezone(dt_util.UTC), mode)
+                        )
+                changes.sort()
+                timelines[key] = changes
+                rows = found.setdefault(key, [])
+                for row in stats.get(device, []):
+                    try:
+                        kwh = float(row["change"]) / 1000.0
+                        at = _row_start(row).astimezone(dt_util.UTC)
+                    except (KeyError, TypeError, ValueError, OverflowError, OSError):
+                        continue
+                    if not (math.isfinite(kwh) and 0 < kwh <= MAX_SLOT_KWH):
+                        continue
+                    mode = mode_at(changes, at + timedelta(minutes=5))
+                    if mode is not None:  # Not before the first known mode.
+                        rows.append((at, mode, kwh))
+            return found
+
+        try:
+            found = await get_instance(self.hass).async_add_executor_job(fetch)
+        except (OSError, HomeAssistantError, SQLAlchemyError, ValueError) as err:
+            _LOGGER.warning(
+                "Could not read mode history (%s); modes are recorded from now on",
+                type(err).__name__,
+            )
+            return
+        for key, rows in found.items():
+            per_hour: dict[str, dict[str, float]] = {}
+            for at, mode, kwh in rows:
+                if _hour_floor(at) >= buffered_from:
+                    self.modes.seed(key, at.isoformat(), mode, kwh)
+                else:
+                    cell = per_hour.setdefault(hour_of(at), {})
+                    cell[mode] = cell.get(mode, 0.0) + kwh
+            for hour, kwh_by_mode in per_hour.items():
+                self.modes.fill(key, hour, kwh_by_mode)
+            # Readings from before the link that the recorder has not compiled yet.
+            for slot, kwh in self._pending_energy.get(key, {}).items():
+                at = dt_util.parse_datetime(slot)
+                if at is not None and (
+                    mode := mode_at(timelines.get(key, []), at + timedelta(minutes=5))
+                ):
+                    self.modes.seed(key, slot, mode, kwh)
+        self._settle_modes(now, delay=timedelta(0))
+
+    def mode_links(self) -> dict[str, tuple[str, str]]:
+        """Tracked meter entity -> (its ledger key, its mode entity)."""
+        return {
+            entity: (key, self._mode_links[key])
+            for entity, (key, _p) in self._sources.items()
+            if key in self._mode_links
+        }
+
+    def mode_names(self, key: str) -> list[str]:
+        """Every mode a sensor is shown for: those the entity offers and any recorded."""
+        found = self.modes.modes(key)
+        prefix = mode_key(key, "")
+        found.update(
+            source[len(prefix) :]
+            for source in self.ledger.totals
+            if source.startswith(prefix)
+        )
+        return sorted(found)
+
+    def mode_values(self, key: str, mode: str) -> dict[str, float]:
+        """Cost and kWh today, month to date and in total for one device in one mode."""
+        source = mode_key(key, mode)
+        today = dt_util.now().date()
+        cost_today, cost_month = device_cost(self.ledger, source, today)
+        total = self.ledger.totals.get(source, {"kwh": 0.0, "cost": 0.0})
+        return {
+            "cost_today": cost_today,
+            "cost_month": cost_month,
+            "cost_total": round(total["cost"], 2),
+            "kwh_today": round(
+                sum(band_kwh(self.ledger, source, today, "today").values()), 3
+            ),
+            "kwh_month": round(
+                sum(band_kwh(self.ledger, source, today, "month").values()), 3
+            ),
+            "kwh_total": round(total["kwh"], 3),
+        }
+
+    def mode_since(self, key: str) -> str | None:
+        return self.modes.since(key)
 
     @property
     def device_pricing(self) -> str:
@@ -914,7 +1237,7 @@ class TariffRuntime:
             changed |= self.ledger.merge_demand_peaks(found)
         if changed and reprice:
             self.ledger.reprice_fixed_days(changed, self._daily_charge)
-            self._store.async_delay_save(self._snapshot, SAVE_DELAY_SECONDS)
+            self._request_save()
             async_dispatcher_send(self.hass, signal_update(self.entry_id))
 
     async def _on_demand_tick(self, _now: Any) -> None:
@@ -949,6 +1272,17 @@ class TariffRuntime:
                 if dt_util.parse_datetime(str(hour))
             }
 
+    def _request_save(self) -> None:
+        """Save soon. A save already on its way is not pushed back by newer readings,
+        so a meter that never pauses can't keep the data in memory forever."""
+        if not self._save_pending:
+            self._save_pending = True
+            self._store.async_delay_save(self._snapshot_for_save, SAVE_DELAY_SECONDS)
+
+    def _snapshot_for_save(self) -> dict:
+        self._save_pending = False
+        return self._snapshot()
+
     def _snapshot(self) -> dict:
         data = self.ledger.to_dict()
         if self._settled_through is not None:
@@ -957,6 +1291,9 @@ class TariffRuntime:
             data["import_gaps"] = dict(self._import_gaps)
         if any(self._forced):
             data["solar_forced"] = list(self._forced)
+        if self._mode_links:
+            self.modes.last.update(self._current_mode)
+            data["modes"] = self.modes.to_dict()
         data["demand_signature"] = self._signature()
         data["history_start"] = self._history_start.isoformat()
         data["pending_energy"] = {
@@ -993,6 +1330,7 @@ class TariffRuntime:
         """Unsubscribe, wait for in-flight demand reads and flush persisted data."""
         self.async_unsubscribe()
         async with self._demand_lock:
+            self._save_pending = False
             await self._store.async_save(self._snapshot())
 
     @callback
@@ -1039,7 +1377,16 @@ class TariffRuntime:
         else:
             delta = self.ledger.record(key, value, now, pricer, reset_on_decrease=reset)
         self._remember_increment(key, now, delta)
-        self._store.async_delay_save(self._snapshot, SAVE_DELAY_SECONDS)
+        if key in self._mode_links and delta > 0:
+            mode = self._current_mode.get(key, UNKNOWN_MODE)
+            slot = _slot(now)
+            self.modes.add(key, slot, mode, delta)
+            if self.modes.note_names(key, [mode]):
+                async_dispatcher_send(self.hass, signal_modes(self.entry_id))
+            if not self.solar_mode and pricer is not None:
+                band, price = pricer(now)  # Priced now, like the device itself.
+                self._book_modes(key, now, band, delta, price, {mode: 1.0})
+        self._request_save()
         async_dispatcher_send(self.hass, signal_update(self.entry_id))
 
     @callback
@@ -1055,9 +1402,10 @@ class TariffRuntime:
         ):
             self._note_import(now, online=False)
         self._settle(now)
+        self._settle_modes(now)
         self.ledger.prune(today)
         self._prune_pending(now)
-        self._store.async_delay_save(self._snapshot, SAVE_DELAY_SECONDS)
+        self._request_save()
         async_dispatcher_send(self.hass, signal_update(self.entry_id))
 
     def summary(self) -> dict[str, float]:
