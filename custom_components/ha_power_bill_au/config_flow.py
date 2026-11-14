@@ -523,7 +523,11 @@ class EnergyTariffCostOptionsFlow(_TariffStepsMixin, OptionsFlowWithReload):
                     vol.Optional(
                         "battery", description={"suggested_value": current["battery"]}
                     ): selector.EntitySelector(
-                        selector.EntitySelectorConfig(domain="sensor")
+                        selector.EntitySelectorConfig(
+                            filter=selector.EntityFilterSelectorConfig(
+                                domain="sensor", device_class="battery"
+                            )
+                        )
                     ),
                 }
             ),

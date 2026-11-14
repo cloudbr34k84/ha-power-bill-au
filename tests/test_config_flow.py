@@ -888,6 +888,13 @@ async def test_a_charger_is_linked_to_a_car_and_unlinked(hass):
         result["flow_id"], {"device": DEVICE}
     )
     assert result["step_id"] == "distance_entities"
+    pickers = {
+        str(key): value.config for key, value in result["data_schema"].schema.items()
+    }
+    # Only battery sensors are offered for the battery level.
+    assert pickers["battery"]["filter"] == [
+        {"domain": ["sensor"], "device_class": ["battery"]}
+    ]
     for bad, field, error in (
         ({"odometer": IMPORT}, "odometer", "invalid_odometer"),
         ({"odometer": "sensor.missing"}, "odometer", "invalid_odometer"),
